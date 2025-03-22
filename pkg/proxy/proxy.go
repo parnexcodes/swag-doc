@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"swag-doc/pkg/logger"
 	"time"
 )
 
@@ -90,6 +91,9 @@ func (p *ProxyServer) Start() error {
 			Request:  reqData,
 			Response: respData,
 		}
+
+		// Log the captured request to the console
+		logTransaction(transaction)
 
 		// Pass the transaction to the interceptor
 		if p.interceptor != nil {
@@ -292,4 +296,16 @@ func sanitizeQueryParams(params url.Values) url.Values {
 		}
 	}
 	return sanitized
+}
+
+// logTransaction logs the captured transaction details to the console
+func logTransaction(tx APITransaction) {
+	// Get content type
+	contentType := "unknown"
+	if ct, ok := tx.Response.Headers["Content-Type"]; ok && len(ct) > 0 {
+		contentType = ct[0]
+	}
+
+	// Use our new logger to print the request log
+	logger.PrintRequestLog(tx.Request.Method, tx.Request.Path, tx.Response.StatusCode, contentType)
 }

@@ -3,106 +3,136 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 )
 
 // Storage interface for storing API transactions
 type Storage interface {
 	Store(transaction APITransaction) error
 	GetAll() ([]APITransaction, error)
+	Clear() error
 }
 
-// FileStorage implements Storage using the file system
+// FileStorage stores API transactions as JSON files
 type FileStorage struct {
-	dataDir string
-	mutex   sync.Mutex
+	baseDir      string
+	sessionFile  string
+	transactions []APITransaction
+	mutex        sync.Mutex
 }
 
-// NewFileStorage creates a new FileStorage instance
-func NewFileStorage(dataDir string) (*FileStorage, error) {
-	// Create data directory if it doesn't exist
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create data directory: %w", err)
+// NewFileStorage creates a new file storage
+func NewFileStorage(baseDir string) (*FileStorage, error) {
+	// Create directory if it doesn't exist
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		return nil, err
 	}
 
+	// Generate a timestamp-based session filename
+	sessionFile := filepath.Join(baseDir, fmt.Sprintf("session-%s.json", time.Now().Format("20060102-150405")))
+
 	return &FileStorage{
-		dataDir: dataDir,
+		baseDir:      baseDir,
+		sessionFile:  sessionFile,
+		transactions: []APITransaction{},
 	}, nil
 }
 
-// Store saves an API transaction to a file
+// Store saves an API transaction to storage
 func (s *FileStorage) Store(transaction APITransaction) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	// Create a filename based on the timestamp and path
-	timestamp := transaction.Request.Timestamp.Format("20060102-150405.000")
-	method := transaction.Request.Method
-	path := transaction.Request.Path
+	// Add transaction to in-memory list
+	s.transactions = append(s.transactions, transaction)
 
-	// Replace any invalid characters in the path
-	path = filepath.Base(path)
-	if path == "" || path == "." || path == "/" {
-		path = "root"
-	}
-
-	filename := fmt.Sprintf("%s-%s-%s.json", timestamp, method, path)
-	filepath := filepath.Join(s.dataDir, filename)
-
-	// Marshal the transaction to JSON
-	data, err := json.MarshalIndent(transaction, "", "  ")
+	// Write all transactions to the session file
+	data, err := json.MarshalIndent(s.transactions, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal transaction: %w", err)
+		return err
 	}
 
-	// Write the JSON to a file
-	if err := os.WriteFile(filepath, data, 0644); err != nil {
-		return fmt.Errorf("failed to write transaction to file: %w", err)
+	// Write to file
+	return os.WriteFile(s.sessionFile, data, 0644)
+}
+
+// GetAll returns all stored API transactions
+func (s *FileStorage) GetAll() ([]APITransaction, error) {
+	// First, load all transactions from session files
+	files, err := os.ReadDir(s.baseDir)
+	if err != nil {
+		return nil, err
+	}
+
+	var allTransactions []APITransaction
+
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+
+		filePath := filepath.Join(s.baseDir, file.Name())
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
+
+		// Check if it's a session file (containing an array)
+		if len(data) > 0 && data[0] == '[' {
+			var transactions []APITransaction
+			if err := json.Unmarshal(data, &transactions); err == nil {
+				allTransactions = append(allTransactions, transactions...)
+			}
+		} else {
+			// For backward compatibility - handle single transaction files
+			var transaction APITransaction
+			if err := json.Unmarshal(data, &transaction); err == nil {
+				allTransactions = append(allTransactions, transaction)
+			}
+		}
+	}
+
+	return allTransactions, nil
+}
+
+// Clear removes all stored API transactions
+func (s *FileStorage) Clear() error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// Reset in-memory transactions
+	s.transactions = []APITransaction{}
+
+	// Remove all files from the directory
+	files, err := os.ReadDir(s.baseDir)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+
+		filePath := filepath.Join(s.baseDir, file.Name())
+		if err := os.Remove(filePath); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-// GetAll returns all stored API transactions
-func (s *FileStorage) GetAll() ([]APITransaction, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	files, err := os.ReadDir(s.dataDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read data directory: %w", err)
-	}
-
-	var transactions []APITransaction
-	for _, file := range files {
-		if file.IsDir() || filepath.Ext(file.Name()) != ".json" {
-			continue
-		}
-
-		filepath := filepath.Join(s.dataDir, file.Name())
-		data, err := os.ReadFile(filepath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read transaction file %s: %w", file.Name(), err)
-		}
-
-		var transaction APITransaction
-		if err := json.Unmarshal(data, &transaction); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal transaction file %s: %w", file.Name(), err)
-		}
-
-		transactions = append(transactions, transaction)
-	}
-
-	return transactions, nil
-}
-
-// TransactionInterceptor creates an APIInterceptor function that stores transactions
-func TransactionInterceptor(storage Storage) APIInterceptor {
+// TransactionInterceptor creates a function to intercept and store API transactions
+func TransactionInterceptor(storage Storage) func(APITransaction) {
 	return func(transaction APITransaction) {
 		if err := storage.Store(transaction); err != nil {
-			fmt.Printf("Error storing transaction: %v\n", err)
+			log.Printf("Error storing API transaction: %v", err)
 		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"swag-doc/pkg/logger"
 	"swag-doc/pkg/openapi"
 	"swag-doc/pkg/proxy"
 
@@ -30,6 +31,7 @@ var (
 	generateDescription string
 	generateVersion     string
 	generateBasePath    string
+	generateCleanup     bool
 
 	// Root command
 	rootCmd = &cobra.Command{
@@ -81,9 +83,12 @@ captured API transactions from the proxy server.`,
   swagdoc generate
 
   # Generate documentation with custom settings
-  swagdoc generate --output api-docs.json --title "My API" --version "2.0.0"`,
+  swagdoc generate --output api-docs.json --title "My API" --version "2.0.0"
+  
+  # Generate documentation and clean up transaction data
+  swagdoc generate --output api-docs.json --cleanup`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return generateDocs(generateOutput, generateDataDir, generateTitle, generateDescription, generateVersion, generateBasePath)
+			return generateDocs(generateOutput, generateDataDir, generateTitle, generateDescription, generateVersion, generateBasePath, generateCleanup)
 		},
 	}
 
@@ -165,6 +170,7 @@ func init() {
 	generateCmd.Flags().StringVar(&generateDescription, "description", "Generated API documentation", "Description for the API documentation")
 	generateCmd.Flags().StringVarP(&generateVersion, "version", "v", "1.0.0", "API version")
 	generateCmd.Flags().StringVar(&generateBasePath, "base-path", "http://localhost:8080", "Base path for the API")
+	generateCmd.Flags().BoolVar(&generateCleanup, "cleanup", false, "Delete the data directory after generating documentation")
 
 	// Add commands to root
 	rootCmd.AddCommand(proxyCmd)
@@ -181,12 +187,17 @@ func main() {
 }
 
 func runProxy(port int, target string, dataDir string) error {
-	fmt.Printf("Starting proxy server on port %d targeting %s\n", port, target)
-	fmt.Printf("Storing API transaction data in %s\n", dataDir)
+	// Print a beautiful startup banner
+	logger.PrintStartupBanner(port, target, dataDir)
+
+	// Print additional info
+	logger.PrintInfo("All transactions will be saved to a single consolidated session file")
+	logger.PrintInfo("Press Ctrl+C to stop the server")
 
 	// Create storage for API transactions
 	storage, err := proxy.NewFileStorage(dataDir)
 	if err != nil {
+		logger.PrintError("Failed to create storage: %v", err)
 		return fmt.Errorf("failed to create storage: %v", err)
 	}
 
@@ -196,31 +207,109 @@ func runProxy(port int, target string, dataDir string) error {
 	// Create and start proxy server
 	server, err := proxy.NewProxyServer(port, target, interceptor)
 	if err != nil {
+		logger.PrintError("Failed to create proxy server: %v", err)
 		return fmt.Errorf("failed to create proxy server: %v", err)
 	}
 
 	if err := server.Start(); err != nil {
+		logger.PrintError("Proxy server error: %v", err)
 		return fmt.Errorf("proxy server error: %v", err)
 	}
 
 	return nil
 }
 
-func generateDocs(output string, dataDir string, title string, description string, version string, basePath string) error {
-	fmt.Printf("Generating Swagger documentation to %s\n", output)
-	fmt.Printf("Reading API transaction data from %s\n", dataDir)
+// Function to filter transactions to prioritize successful responses
+func prioritizeSuccessfulResponses(transactions []proxy.APITransaction) []proxy.APITransaction {
+	// Group transactions by endpoint (method + path)
+	endpointMap := make(map[string][]proxy.APITransaction)
+	for _, tx := range transactions {
+		key := tx.Request.Method + ":" + tx.Request.Path
+		endpointMap[key] = append(endpointMap[key], tx)
+	}
+
+	// Select the best transaction for each endpoint based on status code
+	var filteredTransactions []proxy.APITransaction
+	for _, txs := range endpointMap {
+		// Sort by status code preference
+		best := selectBestTransaction(txs)
+		filteredTransactions = append(filteredTransactions, best)
+	}
+
+	return filteredTransactions
+}
+
+// Function to select the best transaction from a group with the same endpoint
+func selectBestTransaction(transactions []proxy.APITransaction) proxy.APITransaction {
+	if len(transactions) == 1 {
+		return transactions[0]
+	}
+
+	// Priority order: 2xx > 3xx > 4xx > 5xx
+	var best proxy.APITransaction
+	bestPriority := 4 // Default to lowest priority
+
+	for _, tx := range transactions {
+		var priority int
+		statusCode := tx.Response.StatusCode
+
+		switch {
+		case statusCode >= 200 && statusCode < 300:
+			priority = 0 // Highest priority
+		case statusCode >= 300 && statusCode < 400:
+			priority = 1
+		case statusCode >= 400 && statusCode < 500:
+			priority = 2
+		default:
+			priority = 3 // Lowest priority
+		}
+
+		// Update best if this transaction has higher priority (lower number)
+		if priority < bestPriority {
+			bestPriority = priority
+			best = tx
+		} else if priority == bestPriority && statusCode < best.Response.StatusCode {
+			// If same priority band, prefer lower status code
+			best = tx
+		}
+	}
+
+	return best
+}
+
+func generateDocs(output string, dataDir string, title string, description string, version string, basePath string, cleanup bool) error {
+	// Print header
+	fmt.Println(logger.HighlightHeader(" SwagDoc Documentation Generator "))
+	logger.PrintInfo("Generating Swagger documentation to %s", output)
+	logger.PrintInfo("Reading API transaction data from %s", dataDir)
 
 	// Create absolute path for output file
 	absOutput, err := filepath.Abs(output)
 	if err != nil {
+		logger.PrintError("Failed to get absolute path for output file: %v", err)
 		return fmt.Errorf("failed to get absolute path for output file: %v", err)
 	}
 
 	// Create storage to read API transactions
 	storage, err := proxy.NewFileStorage(dataDir)
 	if err != nil {
+		logger.PrintError("Failed to create storage: %v", err)
 		return fmt.Errorf("failed to create storage: %v", err)
 	}
+
+	// Get all transactions
+	transactions, err := storage.GetAll()
+	if err != nil {
+		logger.PrintError("Failed to read API transactions: %v", err)
+		return fmt.Errorf("failed to read API transactions: %v", err)
+	}
+
+	logger.PrintInfo("Found %d API transactions across all session files", len(transactions))
+
+	// Filter transactions to prioritize successful responses
+	filteredTransactions := prioritizeSuccessfulResponses(transactions)
+
+	logger.PrintSuccess("Using %d API transactions after prioritizing successful responses", len(filteredTransactions))
 
 	// Create OpenAPI generator with configuration
 	config := openapi.OpenAPIConfig{
@@ -235,43 +324,52 @@ func generateDocs(output string, dataDir string, title string, description strin
 		},
 	}
 
-	// Get all transactions
-	transactions, err := storage.GetAll()
-	if err != nil {
-		return fmt.Errorf("failed to read API transactions: %v", err)
-	}
-
 	// Create generator
 	generator := openapi.NewOpenAPIGenerator(config)
 
 	// Add all transactions
-	for _, tx := range transactions {
+	for _, tx := range filteredTransactions {
 		generator.AddTransaction(tx)
 	}
 
 	// Generate specification
 	spec, err := generator.GenerateSpec()
 	if err != nil {
+		logger.PrintError("Failed to generate specification: %v", err)
 		return fmt.Errorf("failed to generate specification: %v", err)
 	}
 
 	// Create output directory if needed
 	outDir := filepath.Dir(absOutput)
 	if err := os.MkdirAll(outDir, 0755); err != nil {
+		logger.PrintError("Failed to create output directory: %v", err)
 		return fmt.Errorf("failed to create output directory: %v", err)
 	}
 
 	// Marshal spec to JSON
 	data, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
+		logger.PrintError("Failed to marshal specification: %v", err)
 		return fmt.Errorf("failed to marshal specification: %v", err)
 	}
 
 	// Write to output file
 	if err := os.WriteFile(absOutput, data, 0644); err != nil {
+		logger.PrintError("Failed to write specification to file: %v", err)
 		return fmt.Errorf("failed to write specification to file: %v", err)
 	}
 
-	fmt.Printf("Swagger documentation generated successfully: %s\n", absOutput)
+	logger.PrintSuccess("Swagger documentation generated successfully: %s", absOutput)
+
+	// Clean up data directory if requested
+	if cleanup {
+		logger.PrintInfo("Cleaning up data directory: %s", dataDir)
+		if err := os.RemoveAll(dataDir); err != nil {
+			logger.PrintError("Failed to clean up data directory: %v", err)
+			return fmt.Errorf("failed to clean up data directory: %v", err)
+		}
+		logger.PrintSuccess("Data directory cleaned up successfully")
+	}
+
 	return nil
 }

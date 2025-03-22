@@ -65,6 +65,7 @@ swagdoc generate --output swagger.json
 - `--description`: Description for the API documentation (default: "Generated API documentation")
 - `--version`: API version (default: "1.0.0")
 - `--base-path`: Base path for the API (default: "http://localhost:8080")
+- `--cleanup`: Delete the data directory after generating documentation (default: false)
 
 ## How It Works
 

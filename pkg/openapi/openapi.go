@@ -1,6 +1,7 @@
 package openapi
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -96,6 +97,23 @@ func (g *OpenAPIGenerator) GenerateSpec() (*OpenAPISpec, error) {
 	return g.generateAPI()
 }
 
+// Helper function to decode Base64 response body if needed
+func maybeDecodeBase64(data []byte) ([]byte, error) {
+	// Check if data is base64 encoded
+	if len(data) > 0 && data[0] == 'W' {
+		// Try to decode base64
+		decoded, err := base64.StdEncoding.DecodeString(string(data))
+		if err == nil {
+			// If decoding worked and result looks like JSON, return it
+			if len(decoded) > 0 && (decoded[0] == '{' || decoded[0] == '[') {
+				return decoded, nil
+			}
+		}
+	}
+	// Return original data if not base64 or decode failed
+	return data, nil
+}
+
 // generateAPI generates an OpenAPI document from the transactions
 func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 	// Create a new OpenAPI document
@@ -183,9 +201,22 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 		}
 
 		if tx.Response.Body != nil {
-			bodyObj := make(map[string]interface{})
-			if err := json.Unmarshal(tx.Response.Body, &bodyObj); err == nil {
-				typeInferrer.AddSample("response:"+tx.Request.Method+":"+tx.Request.Path, bodyObj)
+			// Decode the response body from base64 if needed
+			decodedBody, err := maybeDecodeBase64(tx.Response.Body)
+			if err == nil {
+				bodyObj := make(map[string]interface{})
+				if err := json.Unmarshal(decodedBody, &bodyObj); err == nil {
+					typeInferrer.AddSample("response:"+tx.Request.Method+":"+tx.Request.Path, bodyObj)
+				} else {
+					// Try as array
+					var bodyArr []interface{}
+					if err := json.Unmarshal(decodedBody, &bodyArr); err == nil {
+						if len(bodyArr) > 0 {
+							// Use the first item as a sample if it's an array
+							typeInferrer.AddSample("response:"+tx.Request.Method+":"+tx.Request.Path, bodyArr[0])
+						}
+					}
+				}
 			}
 		}
 	}
@@ -373,9 +404,29 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 		// Parse response
 		var responseSchema *parser.Schema
 		if tx.Response.Body != nil {
-			bodyObj := make(map[string]interface{})
-			if err := json.Unmarshal(tx.Response.Body, &bodyObj); err == nil {
-				responseSchema, _ = g.parseJSONBody(bodyObj)
+			// Decode the response body from base64 if needed
+			decodedBody, err := maybeDecodeBase64(tx.Response.Body)
+			if err == nil {
+				// Try as object first
+				bodyObj := make(map[string]interface{})
+				if err := json.Unmarshal(decodedBody, &bodyObj); err == nil {
+					responseSchema, _ = g.parseJSONBody(bodyObj)
+				} else {
+					// Try as array
+					var bodyArr []interface{}
+					if err := json.Unmarshal(decodedBody, &bodyArr); err == nil {
+						if len(bodyArr) > 0 {
+							// Create array schema with the first item as a sample
+							itemSchema, _ := g.parseJSONBody(bodyArr[0])
+							if itemSchema != nil {
+								responseSchema = &parser.Schema{
+									Type:  "array",
+									Items: itemSchema,
+								}
+							}
+						}
+					}
+				}
 			}
 		}
 

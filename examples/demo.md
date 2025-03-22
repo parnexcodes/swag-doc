@@ -77,6 +77,12 @@ curl -X PUT http://localhost:8888/posts/1 \
 go run cmd/swagdoc/main.go generate --output swagger.json --base-path http://localhost:3000
 ```
 
+To generate documentation and automatically clean up the transaction data:
+
+```bash
+go run cmd/swagdoc/main.go generate --output swagger.json --base-path http://localhost:3000 --cleanup
+```
+
 5. View the generated documentation:
 
 You can use tools like [Swagger UI](https://swagger.io/tools/swagger-ui/) or [Redoc](https://github.com/Redocly/redoc) to view the generated documentation.
