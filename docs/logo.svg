@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg width="400" height="100" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .title { font: bold 48px sans-serif; fill: #333; }
+    .subtitle { font: 18px sans-serif; fill: #666; }
+    .icon { fill: #4285F4; }
+  </style>
+  
+  <!-- Logo Icon -->
+  <g transform="translate(20, 60)">
+    <path class="icon" d="M40 0 L80 30 L40 60 L0 30 Z" />
+    <circle class="icon" cx="40" cy="30" r="15" />
+  </g>
+  
+  <!-- Text -->
+  <text x="120" y="60" class="title">SwagDoc</text>
+  <text x="120" y="85" class="subtitle">Auto-generated API Documentation</text>
+</svg> 
