@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"strings"
 
-	"swag-doc/pkg/parser"
-	"swag-doc/pkg/proxy"
+	"github.com/parnexcodes/swag-doc/pkg/parser"
+	"github.com/parnexcodes/swag-doc/pkg/proxy"
 
 	"github.com/getkin/kin-openapi/openapi3"
 )

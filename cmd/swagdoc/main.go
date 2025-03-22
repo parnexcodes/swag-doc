@@ -6,9 +6,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"swag-doc/pkg/logger"
-	"swag-doc/pkg/openapi"
-	"swag-doc/pkg/proxy"
+	"github.com/parnexcodes/swag-doc/pkg/logger"
+	"github.com/parnexcodes/swag-doc/pkg/openapi"
+	"github.com/parnexcodes/swag-doc/pkg/proxy"
 
 	"github.com/spf13/cobra"
 )

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"swag-doc/pkg/proxy"
+	"github.com/parnexcodes/swag-doc/pkg/proxy"
 )
 
 // OpenAPIVersion is the OpenAPI version used in generated specs

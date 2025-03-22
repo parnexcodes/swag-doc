@@ -9,8 +9,9 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"swag-doc/pkg/logger"
 	"time"
+
+	"github.com/parnexcodes/swag-doc/pkg/logger"
 )
 
 // RequestData stores information about an HTTP request

@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"swag-doc/pkg/proxy"
+	"github.com/parnexcodes/swag-doc/pkg/proxy"
 )
 
 // Generator creates OpenAPI documentation from recorded API calls
