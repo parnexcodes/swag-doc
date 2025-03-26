@@ -21,6 +21,10 @@ SwagDoc automatically generates Swagger/OpenAPI documentation from your API traf
 go install github.com/parnexcodes/swag-doc/cmd/swagdoc@latest
 ```
 
+### From Releases
+
+You can download pre-built binaries from the [Releases](https://github.com/parnexcodes/swag-doc/releases) page.
+
 ### From Source
 
 ```bash
@@ -102,6 +106,36 @@ swagdoc generate --group-by-path=false
    - Content types
 3. **Infer Types**: It infers data types from the observed values in JSON payloads.
 4. **Generate OpenAPI**: It generates an OpenAPI specification that describes your API.
+
+## Development
+
+### Building From Source
+
+```bash
+# Build for your current platform
+make build
+
+# Run tests
+make test
+
+# Clean build artifacts
+make clean
+```
+
+### GitHub Actions Workflows
+
+This project includes GitHub Actions workflows for:
+
+- **Testing**: Runs tests on every push and PR
+- **Building**: Builds the application for Linux, Windows, and macOS
+- **Releasing**: Creates a new GitHub release with compiled binaries when a new tag is pushed
+
+To create a new release:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
 
 ## Future Features
 
