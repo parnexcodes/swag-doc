@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ "master" ]
 
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -70,6 +74,9 @@ jobs:
   release:
     needs: [build, build-windows, build-mac]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
     steps:
     - name: Download Linux build
       uses: actions/download-artifact@v4
