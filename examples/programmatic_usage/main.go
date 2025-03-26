@@ -80,6 +80,17 @@ func generateDocs(storage proxy.Storage, outputFile string) {
 	// Create OpenAPI generator
 	generator := openapi.NewGenerator(storage, title, description, version, basePath)
 
+	// Configure API endpoint grouping (optional)
+	generator.SetUsePathGroups(true) // Group APIs by path segments (default)
+
+	// Add custom tag mappings (optional)
+	generator.SetTagMapping("users", "User Management")
+	generator.SetTagMapping("posts", "Content Management")
+
+	// Set custom version prefixes (optional)
+	generator.SetVersionPrefix("api")
+	generator.SetVersionPrefix("v1")
+
 	// Generate OpenAPI documentation
 	if err := generator.Generate(absOutput); err != nil {
 		log.Fatalf("Failed to generate documentation: %v", err)

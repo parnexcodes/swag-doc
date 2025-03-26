@@ -10,22 +10,43 @@ import (
 
 // Generator creates OpenAPI documentation from recorded API calls
 type Generator struct {
-	storage     proxy.Storage
-	title       string
-	description string
-	version     string
-	basePath    string
+	storage         proxy.Storage
+	title           string
+	description     string
+	version         string
+	basePath        string
+	tagMappings     map[string]string
+	usePathGroups   bool
+	versionPrefixes map[string]bool
 }
 
 // NewGenerator creates a new generator
 func NewGenerator(storage proxy.Storage, title, description, version, basePath string) *Generator {
 	return &Generator{
-		storage:     storage,
-		title:       title,
-		description: description,
-		version:     version,
-		basePath:    basePath,
+		storage:         storage,
+		title:           title,
+		description:     description,
+		version:         version,
+		basePath:        basePath,
+		tagMappings:     make(map[string]string),
+		usePathGroups:   true,
+		versionPrefixes: make(map[string]bool),
 	}
+}
+
+// SetTagMapping sets a custom tag mapping for paths with a specific prefix
+func (g *Generator) SetTagMapping(pathPrefix, tag string) {
+	g.tagMappings[pathPrefix] = tag
+}
+
+// SetVersionPrefix adds a custom version prefix for path handling
+func (g *Generator) SetVersionPrefix(prefix string) {
+	g.versionPrefixes[prefix] = true
+}
+
+// SetUsePathGroups configures whether to group APIs by path segments
+func (g *Generator) SetUsePathGroups(use bool) {
+	g.usePathGroups = use
 }
 
 // Generate creates an OpenAPI specification from the recorded API calls
@@ -38,9 +59,12 @@ func (g *Generator) Generate(outputPath string) error {
 
 	// Create config
 	config := OpenAPIConfig{
-		Title:       g.title,
-		Description: g.description,
-		Version:     g.version,
+		Title:           g.title,
+		Description:     g.description,
+		Version:         g.version,
+		TagMappings:     g.tagMappings,
+		UsePathGroups:   g.usePathGroups,
+		VersionPrefixes: g.versionPrefixes,
 		Servers: []OpenAPIServer{
 			{
 				URL:         g.basePath,

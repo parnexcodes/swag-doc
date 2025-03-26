@@ -83,6 +83,39 @@ To generate documentation and automatically clean up the transaction data:
 go run cmd/swagdoc/main.go generate --output swagger.json --base-path http://localhost:3000 --cleanup
 ```
 
+### Organizing API Documentation with Tags
+
+SwagDoc automatically organizes your API endpoints into logical groups based on the URL path structure. In this example, the endpoints are already organized into "Users" and "Posts" categories.
+
+You can customize this grouping with the `--tag-mapping` flag:
+
+```bash
+# Group all users endpoints under "User Management" tag
+go run cmd/swagdoc/main.go generate --output swagger.json --tag-mapping "users:User Management"
+
+# Group multiple paths with descriptive tags
+go run cmd/swagdoc/main.go generate --output swagger.json \
+  --tag-mapping "users:User Management" \
+  --tag-mapping "posts:Content Management"
+
+# Define custom version prefixes (useful for APIs with versioning)
+go run cmd/swagdoc/main.go generate --output swagger.json --version-prefix "api" --version-prefix "v2"
+```
+
+### Advanced Customization
+
+For complex APIs with nested resources, you can map specific path prefixes to custom tags:
+
+```bash
+# For APIs with paths like /api/v1/users/1/posts
+go run cmd/swagdoc/main.go generate --output swagger.json \
+  --tag-mapping "users:User Management" \
+  --tag-mapping "users/posts:User Content" \
+  --version-prefix "api"
+```
+
+This will properly organize the Swagger UI into meaningful sections that make your API documentation more readable and easier to navigate.
+
 5. View the generated documentation:
 
 You can use tools like [Swagger UI](https://swagger.io/tools/swagger-ui/) or [Redoc](https://github.com/Redocly/redoc) to view the generated documentation.

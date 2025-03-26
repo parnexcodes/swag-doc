@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/parnexcodes/swag-doc/pkg/logger"
 	"github.com/parnexcodes/swag-doc/pkg/openapi"
@@ -25,13 +26,16 @@ var (
 	proxyDataDir string
 
 	// Generate command flags
-	generateOutput      string
-	generateDataDir     string
-	generateTitle       string
-	generateDescription string
-	generateVersion     string
-	generateBasePath    string
-	generateCleanup     bool
+	generateOutput        string
+	generateDataDir       string
+	generateTitle         string
+	generateDescription   string
+	generateVersion       string
+	generateBasePath      string
+	generateCleanup       bool
+	generateUsePathGroups bool
+	generateTagMapping    []string
+	generateVersionPrefix []string
 
 	// Root command
 	rootCmd = &cobra.Command{
@@ -86,9 +90,13 @@ captured API transactions from the proxy server.`,
   swagdoc generate --output api-docs.json --title "My API" --version "2.0.0"
   
   # Generate documentation and clean up transaction data
-  swagdoc generate --output api-docs.json --cleanup`,
+  swagdoc generate --output api-docs.json --cleanup
+  
+  # Generate documentation with custom tag mappings
+  swagdoc generate --tag-mapping "auth:Authentication" --tag-mapping "users:User Management"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return generateDocs(generateOutput, generateDataDir, generateTitle, generateDescription, generateVersion, generateBasePath, generateCleanup)
+			return generateDocs(generateOutput, generateDataDir, generateTitle, generateDescription,
+				generateVersion, generateBasePath, generateCleanup)
 		},
 	}
 
@@ -171,6 +179,9 @@ func init() {
 	generateCmd.Flags().StringVarP(&generateVersion, "version", "v", "1.0.0", "API version")
 	generateCmd.Flags().StringVar(&generateBasePath, "base-path", "http://localhost:8080", "Base path for the API")
 	generateCmd.Flags().BoolVar(&generateCleanup, "cleanup", false, "Delete the data directory after generating documentation")
+	generateCmd.Flags().BoolVar(&generateUsePathGroups, "group-by-path", true, "Group API endpoints by path segments")
+	generateCmd.Flags().StringSliceVar(&generateTagMapping, "tag-mapping", []string{}, "Custom tag mappings in format 'path:tag' (can be used multiple times)")
+	generateCmd.Flags().StringSliceVar(&generateVersionPrefix, "version-prefix", []string{}, "Custom version prefixes (can be used multiple times)")
 
 	// Add commands to root
 	rootCmd.AddCommand(proxyCmd)
@@ -277,6 +288,7 @@ func selectBestTransaction(transactions []proxy.APITransaction) proxy.APITransac
 	return best
 }
 
+// generateDocs generates Swagger/OpenAPI documentation from API transactions
 func generateDocs(output string, dataDir string, title string, description string, version string, basePath string, cleanup bool) error {
 	// Print header
 	fmt.Println(logger.HighlightHeader(" SwagDoc Documentation Generator "))
@@ -313,15 +325,31 @@ func generateDocs(output string, dataDir string, title string, description strin
 
 	// Create OpenAPI generator with configuration
 	config := openapi.OpenAPIConfig{
-		Title:       title,
-		Description: description,
-		Version:     version,
+		Title:           title,
+		Description:     description,
+		Version:         version,
+		UsePathGroups:   generateUsePathGroups,
+		TagMappings:     make(map[string]string),
+		VersionPrefixes: make(map[string]bool),
 		Servers: []openapi.OpenAPIServer{
 			{
 				URL:         basePath,
 				Description: "API Server",
 			},
 		},
+	}
+
+	// Process tag mappings from command line
+	for _, mapping := range generateTagMapping {
+		parts := strings.SplitN(mapping, ":", 2)
+		if len(parts) == 2 {
+			config.TagMappings[parts[0]] = parts[1]
+		}
+	}
+
+	// Process version prefixes from command line
+	for _, prefix := range generateVersionPrefix {
+		config.VersionPrefixes[prefix] = true
 	}
 
 	// Create generator

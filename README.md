@@ -66,6 +66,30 @@ swagdoc generate --output swagger.json
 - `--version`: API version (default: "1.0.0")
 - `--base-path`: Base path for the API (default: "http://localhost:8080")
 - `--cleanup`: Delete the data directory after generating documentation (default: false)
+- `--group-by-path`: Group API endpoints by path segments (default: true)
+- `--tag-mapping`: Custom tag mappings in format 'path:tag' (can be used multiple times)
+- `--version-prefix`: Custom version prefixes (can be used multiple times)
+
+### Organizing API Documentation
+
+SwagDoc automatically organizes your API endpoints into logical groups based on the URL path structure. For example:
+
+- `/auth/login` and `/auth/register` will be grouped under the "Auth" tag
+- `/users/123` and `/users/profile` will be grouped under the "Users" tag
+- `/api/v1/orders` will be grouped under the "Orders" tag (automatically handling API version prefixes)
+
+You can customize this grouping with the `--tag-mapping` flag:
+
+```bash
+# Group all paths starting with "auth" under "Authentication" tag
+swagdoc generate --tag-mapping "auth:Authentication" --tag-mapping "users:User Management"
+
+# Define custom version prefixes
+swagdoc generate --version-prefix "api" --version-prefix "v4"
+
+# Disable automatic path grouping
+swagdoc generate --group-by-path=false
+```
 
 ## How It Works
 

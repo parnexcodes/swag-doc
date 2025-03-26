@@ -29,10 +29,13 @@ type OpenAPIGenerator struct {
 
 // OpenAPIConfig holds configuration for the generator
 type OpenAPIConfig struct {
-	Title       string
-	Description string
-	Version     string
-	Servers     []OpenAPIServer
+	Title           string
+	Description     string
+	Version         string
+	Servers         []OpenAPIServer
+	TagMappings     map[string]string // Maps path prefixes to custom tags
+	UsePathGroups   bool              // Whether to group APIs by path segments
+	VersionPrefixes map[string]bool   // Custom version prefixes to detect
 }
 
 // OpenAPIServer represents an API server in the OpenAPI spec
@@ -43,6 +46,15 @@ type OpenAPIServer struct {
 
 // NewOpenAPIGenerator creates a new OpenAPI generator
 func NewOpenAPIGenerator(config OpenAPIConfig) *OpenAPIGenerator {
+	// Initialize maps if they're nil
+	if config.TagMappings == nil {
+		config.TagMappings = make(map[string]string)
+	}
+
+	if config.VersionPrefixes == nil {
+		config.VersionPrefixes = make(map[string]bool)
+	}
+
 	return &OpenAPIGenerator{
 		config:       config,
 		transactions: []proxy.APITransaction{},
@@ -276,7 +288,7 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 		// Create the operation
 		op := &openapi3.Operation{
 			Responses: openapi3.NewResponses(),
-			Tags:      []string{},
+			Tags:      []string{g.extractTagFromPath(templatedPath)},
 		}
 
 		// Extract path parameters
@@ -598,6 +610,32 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 		}
 	}
 
+	// Generate tags for the document
+	tagSet := make(map[string]bool)
+
+	// Collect all unique tags from operations
+	for _, path := range doc.Paths.Map() {
+		for _, op := range []*openapi3.Operation{
+			path.Get, path.Post, path.Put,
+			path.Delete, path.Options, path.Head,
+			path.Patch, path.Trace,
+		} {
+			if op != nil && len(op.Tags) > 0 {
+				for _, tag := range op.Tags {
+					tagSet[tag] = true
+				}
+			}
+		}
+	}
+
+	// Create tag objects for the specification
+	for tag := range tagSet {
+		doc.Tags = append(doc.Tags, &openapi3.Tag{
+			Name:        tag,
+			Description: fmt.Sprintf("Operations related to %s", tag),
+		})
+	}
+
 	return doc, nil
 }
 
@@ -815,4 +853,61 @@ func getContentType(headers http.Header) string {
 	}
 
 	return strings.TrimSpace(contentType)
+}
+
+// extractTagFromPath extracts a tag name from the API path
+func (g *OpenAPIGenerator) extractTagFromPath(path string) string {
+	// Remove leading slash and get first segment
+	trimmedPath := strings.TrimPrefix(path, "/")
+	segments := strings.Split(trimmedPath, "/")
+
+	if len(segments) == 0 {
+		return "default"
+	}
+
+	// Check for custom tag mappings first
+	if g.config.TagMappings != nil {
+		for prefix, tag := range g.config.TagMappings {
+			if strings.HasPrefix(trimmedPath, prefix) {
+				return tag
+			}
+		}
+	}
+
+	// Use the first segment as the tag
+	firstSegment := segments[0]
+
+	// Handle common API version prefixes
+	if g.isVersionPrefix(firstSegment) && len(segments) > 1 {
+		// If the path starts with a version (v1, api, etc.), use the second segment
+		return capitalize(segments[1])
+	}
+
+	// For all other paths, use the first segment
+	return capitalize(firstSegment)
+}
+
+// isVersionPrefix checks if a path segment is a common API version prefix
+func (g *OpenAPIGenerator) isVersionPrefix(segment string) bool {
+	segment = strings.ToLower(segment)
+
+	// Use custom version prefixes if configured
+	if g.config.VersionPrefixes != nil && len(g.config.VersionPrefixes) > 0 {
+		return g.config.VersionPrefixes[segment]
+	}
+
+	// Default version prefixes
+	versionPrefixes := map[string]bool{
+		"v1": true, "v2": true, "v3": true,
+		"api": true, "v": true, "rest": true,
+	}
+	return versionPrefixes[segment]
+}
+
+// capitalize properly capitalizes a string for display as a tag
+func capitalize(s string) string {
+	if s == "" {
+		return "default"
+	}
+	return strings.Title(s)
 }
