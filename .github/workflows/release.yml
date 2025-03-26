@@ -25,7 +25,7 @@ jobs:
       run: go test -v ./...
       
     - name: Upload build artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: swagdoc-linux
         path: swagdoc
@@ -44,7 +44,7 @@ jobs:
       run: go build -v -o swagdoc.exe ./cmd/swagdoc
       
     - name: Upload build artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: swagdoc-windows
         path: swagdoc.exe
@@ -63,7 +63,7 @@ jobs:
       run: go build -v -o swagdoc-mac ./cmd/swagdoc
       
     - name: Upload build artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: swagdoc-mac
         path: swagdoc-mac
@@ -74,17 +74,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Download Linux build
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: swagdoc-linux
         
     - name: Download Windows build
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: swagdoc-windows
         
     - name: Download Mac build
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: swagdoc-mac
     
