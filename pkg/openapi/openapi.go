@@ -216,6 +216,7 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 			// Decode the response body from base64 if needed
 			decodedBody, err := maybeDecodeBase64(tx.Response.Body)
 			if err == nil {
+				// Try as object first
 				bodyObj := make(map[string]interface{})
 				if err := json.Unmarshal(decodedBody, &bodyObj); err == nil {
 					typeInferrer.AddSample("response:"+tx.Request.Method+":"+tx.Request.Path, bodyObj)
@@ -224,8 +225,10 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 					var bodyArr []interface{}
 					if err := json.Unmarshal(decodedBody, &bodyArr); err == nil {
 						if len(bodyArr) > 0 {
-							// Use the first item as a sample if it's an array
-							typeInferrer.AddSample("response:"+tx.Request.Method+":"+tx.Request.Path, bodyArr[0])
+							// For arrays, add each item as a separate sample for better type inference
+							for _, item := range bodyArr {
+								typeInferrer.AddSample("response:"+tx.Request.Method+":"+tx.Request.Path+":item", item)
+							}
 						}
 					}
 				}
@@ -431,10 +434,19 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 							// Create array schema with the first item as a sample
 							itemSchema, _ := g.parseJSONBody(bodyArr[0])
 							if itemSchema != nil {
+								// For array items, use the first item as an example
+								// This ensures we have realistic example data
 								responseSchema = &parser.Schema{
-									Type:  "array",
-									Items: itemSchema,
+									Type:    "array",
+									Items:   itemSchema,
+									Example: bodyArr, // Use the actual array as an example
 								}
+							}
+						} else {
+							// Empty array - create a default array schema
+							responseSchema = &parser.Schema{
+								Type:  "array",
+								Items: &parser.Schema{Type: "string"},
 							}
 						}
 					}
@@ -452,9 +464,20 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 			// Apply type inference to improve schema quality
 			samples := []interface{}{}
 			if tx.Response.Body != nil {
+				// Try as object
 				bodyObj := make(map[string]interface{})
 				if err := json.Unmarshal(tx.Response.Body, &bodyObj); err == nil {
 					samples = append(samples, bodyObj)
+				} else {
+					// Try as array of objects
+					var bodyArr []interface{}
+					if err := json.Unmarshal(tx.Response.Body, &bodyArr); err == nil {
+						// For arrays, preserve the whole array as an example
+						if responseSchema.Type == "array" && responseSchema.Items != nil {
+							// Keep the original response as an example
+							responseSchema.Example = bodyArr
+						}
+					}
 				}
 			}
 
@@ -655,6 +678,7 @@ func (g *OpenAPIGenerator) parseJSONBody(body interface{}) (*parser.Schema, erro
 		schema = parser.Schema{
 			Type:       "object",
 			Properties: make(map[string]parser.Schema),
+			Example:    processedBody, // Store the actual object as an example
 		}
 
 		for key, val := range v {
@@ -665,7 +689,8 @@ func (g *OpenAPIGenerator) parseJSONBody(body interface{}) (*parser.Schema, erro
 		}
 	case []interface{}:
 		schema = parser.Schema{
-			Type: "array",
+			Type:    "array",
+			Example: processedBody, // Store the actual array as an example
 		}
 
 		if len(v) > 0 {
@@ -675,23 +700,27 @@ func (g *OpenAPIGenerator) parseJSONBody(body interface{}) (*parser.Schema, erro
 		}
 	case string:
 		schema = parser.Schema{
-			Type: "string",
+			Type:    "string",
+			Example: v, // Store the actual string as an example
 		}
 	case float64:
 		if v == float64(int(v)) {
 			schema = parser.Schema{
-				Type:   "integer",
-				Format: "int64",
+				Type:    "integer",
+				Format:  "int64",
+				Example: int64(v), // Store the actual integer as an example
 			}
 		} else {
 			schema = parser.Schema{
-				Type:   "number",
-				Format: "double",
+				Type:    "number",
+				Format:  "double",
+				Example: v, // Store the actual number as an example
 			}
 		}
 	case bool:
 		schema = parser.Schema{
-			Type: "boolean",
+			Type:    "boolean",
+			Example: v, // Store the actual boolean as an example
 		}
 	default:
 		return nil, fmt.Errorf("unsupported type: %T", processedBody)
@@ -783,6 +812,9 @@ func isAuthHeader(name string) bool {
 
 // Helper function to convert a parser.Schema to an openapi3.Schema
 func toOpenAPISchema(schema parser.Schema) *openapi3.Schema {
+	// First, process any examples to convert placeholders
+	schema = processSchemaExamples(schema)
+
 	var result *openapi3.Schema
 
 	switch schema.Type {
@@ -808,6 +840,7 @@ func toOpenAPISchema(schema parser.Schema) *openapi3.Schema {
 		result = openapi3.NewSchema()
 	}
 
+	// Copy example values
 	result.Example = schema.Example
 	result.Nullable = schema.Nullable
 
@@ -838,6 +871,71 @@ func toOpenAPISchema(schema parser.Schema) *openapi3.Schema {
 	}
 
 	return result
+}
+
+// processSchemaExamples recursively processes all examples in a schema to convert placeholders
+func processSchemaExamples(schema parser.Schema) parser.Schema {
+	// Process the schema's own example
+	if ex, ok := schema.Example.(string); ok {
+		schema.Example = convertPlaceholderString(ex)
+	} else if arrEx, ok := schema.Example.([]interface{}); ok {
+		// Process array examples
+		for i, item := range arrEx {
+			if mapItem, ok := item.(map[string]interface{}); ok {
+				// Process each field in the map
+				for key, val := range mapItem {
+					if strVal, ok := val.(string); ok {
+						mapItem[key] = convertPlaceholderString(strVal)
+					}
+				}
+				arrEx[i] = mapItem
+			}
+		}
+		schema.Example = arrEx
+	} else if mapEx, ok := schema.Example.(map[string]interface{}); ok {
+		// Process map examples
+		for key, val := range mapEx {
+			if strVal, ok := val.(string); ok {
+				mapEx[key] = convertPlaceholderString(strVal)
+			}
+		}
+		schema.Example = mapEx
+	}
+
+	// Process properties for objects
+	if schema.Properties != nil {
+		for name, propSchema := range schema.Properties {
+			schema.Properties[name] = processSchemaExamples(propSchema)
+		}
+	}
+
+	// Process items for arrays
+	if schema.Items != nil {
+		processedItems := processSchemaExamples(*schema.Items)
+		schema.Items = &processedItems
+	}
+
+	return schema
+}
+
+// Helper function to convert placeholder strings to appropriate values
+func convertPlaceholderString(value string) interface{} {
+	switch value {
+	case "__string__":
+		return "string"
+	case "__integer__":
+		return int64(0)
+	case "__number__":
+		return 0.0
+	case "__boolean__":
+		return false
+	case "__unknown__":
+		return "unknown"
+	case "__redacted__":
+		return "redacted"
+	default:
+		return value
+	}
 }
 
 // Helper function to get content type from headers
