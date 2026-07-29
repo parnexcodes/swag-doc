@@ -16,7 +16,13 @@ import (
 
 const (
 	defaultDataDir = "./swagdoc-data"
-	version        = "1.0.0"
+)
+
+// Set via ldflags at build time.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
 )
 
 var (
@@ -107,7 +113,7 @@ captured API transactions from the proxy server.`,
 		Short: "Print the version number of swagdoc",
 		Long:  `All software has versions. This is swagdoc's.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("swagdoc version %s\n", version)
+			fmt.Printf("swagdoc %s (commit: %s, built: %s)\n", version, commit, date)
 		},
 	}
 

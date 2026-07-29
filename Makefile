@@ -1,17 +1,36 @@
-.PHONY: build run test clean example proxy generate
+.PHONY: build run test lint fmt coverage clean example proxy generate install demo vulncheck
 
 # Build the application
 build:
-	go build -o bin/swagdoc ./cmd/swagdoc
+	go build -trimpath -ldflags="-s -w" -o bin/swagdoc ./cmd/swagdoc
 
 # Run the tests
 test:
-	go test -v ./...
+	go test -v -race ./...
+
+# Run golangci-lint
+lint:
+	golangci-lint run
+
+# Format code
+fmt:
+	golangci-lint fmt
+
+# Run tests with coverage
+coverage:
+	go test -coverprofile=coverage.out -covermode=atomic ./...
+	go tool cover -func=coverage.out
+	go tool cover -html=coverage.out -o coverage.html
+
+# Run vulnerability check
+vulncheck:
+	govulncheck ./...
 
 # Clean the build artifacts
 clean:
 	rm -rf bin/
 	rm -rf swagdoc-data/
+	rm -f coverage.out coverage.html
 
 # Run the example API
 example:
@@ -56,4 +75,4 @@ demo: build
 	./bin/swagdoc generate --output swagger.json --base-path http://localhost:3000 && \
 	echo "Stopping servers..." && \
 	kill $$PROXY_PID && \
-	kill $$API_PID 
+	kill $$API_PID
