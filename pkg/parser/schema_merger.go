@@ -100,22 +100,18 @@ func mergeObjectProperties(aProps, bProps map[string]Schema) map[string]Schema {
 	result := make(map[string]Schema)
 
 	// Copy properties from a
-	if aProps != nil {
-		for name, schema := range aProps {
-			result[name] = schema
-		}
+	for name, schema := range aProps {
+		result[name] = schema
 	}
 
 	// Merge in properties from b
-	if bProps != nil {
-		for name, schema := range bProps {
-			if existingSchema, exists := result[name]; exists {
-				// Property exists in both - merge the schemas
-				result[name] = mergeSchema(existingSchema, schema)
-			} else {
-				// Property only in b - add it
-				result[name] = schema
-			}
+	for name, schema := range bProps {
+		if existingSchema, exists := result[name]; exists {
+			// Property exists in both - merge the schemas
+			result[name] = mergeSchema(existingSchema, schema)
+		} else {
+			// Property only in b - add it
+			result[name] = schema
 		}
 	}
 
@@ -173,89 +169,6 @@ func mergeEnums(a, b []interface{}) []interface{} {
 	var result []interface{}
 	for val := range enumMap {
 		result = append(result, val)
-	}
-
-	return result
-}
-
-// MergeRequestBody merges request bodies from multiple examples
-func MergeRequestBody(bodies []*RequestBody) *RequestBody {
-	if len(bodies) == 0 {
-		return nil
-	}
-
-	if len(bodies) == 1 {
-		return bodies[0]
-	}
-
-	// Start with a copy of the first body
-	result := &RequestBody{
-		Description: bodies[0].Description,
-		Required:    bodies[0].Required || bodies[1].Required, // Required if any is required
-		Content:     make(map[string]MediaType),
-	}
-
-	// Merge content types
-	for _, body := range bodies {
-		for contentType, mediaType := range body.Content {
-			if existingMediaType, exists := result.Content[contentType]; exists {
-				// Merge schemas for the same content type
-				merged := mediaType
-				merged.Schema = mergeSchema(existingMediaType.Schema, mediaType.Schema)
-				result.Content[contentType] = merged
-			} else {
-				// Add new content type
-				result.Content[contentType] = mediaType
-			}
-		}
-	}
-
-	return result
-}
-
-// MergeResponse merges responses from multiple examples
-func MergeResponse(responses []Response) Response {
-	if len(responses) == 0 {
-		return Response{}
-	}
-
-	if len(responses) == 1 {
-		return responses[0]
-	}
-
-	// Start with a copy of the first response
-	result := Response{
-		Description: responses[0].Description,
-		Content:     make(map[string]MediaType),
-		Headers:     make(map[string]Header),
-	}
-
-	// Merge content types
-	for _, response := range responses {
-		for contentType, mediaType := range response.Content {
-			if existingMediaType, exists := result.Content[contentType]; exists {
-				// Merge schemas for the same content type
-				merged := mediaType
-				merged.Schema = mergeSchema(existingMediaType.Schema, mediaType.Schema)
-				result.Content[contentType] = merged
-			} else {
-				// Add new content type
-				result.Content[contentType] = mediaType
-			}
-		}
-
-		// Merge headers
-		for name, header := range response.Headers {
-			if existingHeader, exists := result.Headers[name]; exists {
-				// Merge header schemas
-				merged := header
-				merged.Schema = mergeSchema(existingHeader.Schema, header.Schema)
-				result.Headers[name] = merged
-			} else {
-				// Add new header
-				result.Headers[name] = header
-			}
-		}
 	}
 
 	return result

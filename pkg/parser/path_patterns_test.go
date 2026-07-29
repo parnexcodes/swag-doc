@@ -142,9 +142,10 @@ func TestAnalyzePatterns(t *testing.T) {
 		{
 			name:          "different segment counts - no pattern",
 			paths:         []string{"/users", "/users/123/posts"},
-			expectedCount: 1,
+			expectedCount: 2, // detectCommonRESTPatterns + single-path templatization
 			validateResult: func(t *testing.T, patterns map[string]string) {
 				assert.Contains(t, patterns, "/users/{id}")
+				assert.Contains(t, patterns, "/users/{id}/posts")
 			},
 		},
 		{
@@ -286,8 +287,8 @@ func TestInferParameterType(t *testing.T) {
 		{
 			name:         "empty values",
 			values:       []string{},
-			expectedName: "id", // Implementation returns id for empty values
-			expectedDesc: "Numeric identifier",
+			expectedName: "param",
+			expectedDesc: "Path parameter",
 		},
 	}
 
@@ -331,7 +332,7 @@ func TestTemplatizePath(t *testing.T) {
 			name:           "no match",
 			setupPaths:     []string{"/users/123", "/users/456"},
 			testPath:       "/products/789",
-			expectedResult: "/products/789",
+			expectedResult: "/products/{id}", // Now templatizes all numeric segments
 		},
 		{
 			name:           "empty path",
