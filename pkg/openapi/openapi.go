@@ -117,10 +117,8 @@ func maybeDecodeBase64(data []byte) ([]byte, error) {
 	}
 
 	// Check if data looks like valid base64 by attempting to decode it
-	// Base64 encoded data has specific character set and padding requirements
 	decoded, err := base64.StdEncoding.DecodeString(string(data))
 	if err != nil {
-		// Try standard base64 without padding
 		decoded, err = base64.RawStdEncoding.DecodeString(string(data))
 		if err != nil {
 			return data, nil
@@ -133,6 +131,73 @@ func maybeDecodeBase64(data []byte) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+// maybeDecodeBase64Bytes is like maybeDecodeBase64 but returns just the bytes
+func maybeDecodeBase64Bytes(data []byte) []byte {
+	result, _ := maybeDecodeBase64(data)
+	return result
+}
+
+// sanitizeBodyForSchema sanitizes a raw JSON body into type placeholders for schema inference.
+// This replaces actual values with type markers while preserving structure.
+func sanitizeBodyForSchema(data []byte) []byte {
+	if len(data) == 0 {
+		return nil
+	}
+
+	var obj interface{}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return nil
+	}
+
+	sanitized := sanitizeValueForSchema(obj)
+	result, err := json.Marshal(sanitized)
+	if err != nil {
+		return nil
+	}
+	return result
+}
+
+// sanitizeValueForSchema replaces actual values with type placeholders
+func sanitizeValueForSchema(value interface{}) interface{} {
+	if value == nil {
+		return nil
+	}
+
+	switch v := value.(type) {
+	case map[string]interface{}:
+		result := make(map[string]interface{})
+		for key, val := range v {
+			result[key] = sanitizeValueForSchema(val)
+		}
+		return result
+	case []interface{}:
+		if len(v) == 0 {
+			return []interface{}{}
+		}
+		// Keep up to 5 elements for better schema inference
+		maxElements := 5
+		if len(v) < maxElements {
+			maxElements = len(v)
+		}
+		result := make([]interface{}, maxElements)
+		for i := 0; i < maxElements; i++ {
+			result[i] = sanitizeValueForSchema(v[i])
+		}
+		return result
+	case string:
+		return "__string__"
+	case float64:
+		if v == float64(int(v)) {
+			return "__integer__"
+		}
+		return "__number__"
+	case bool:
+		return "__boolean__"
+	default:
+		return "__unknown__"
+	}
 }
 
 // generateAPI generates an OpenAPI document from the transactions
@@ -213,28 +278,29 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 
 		authDetector.AnalyzeTransaction(authReq, authResp)
 
-		// Collect samples for type inference
+		// Collect samples for type inference using sanitized data
 		if tx.Request.Body != nil {
-			bodyObj := make(map[string]interface{})
-			if err := json.Unmarshal(tx.Request.Body, &bodyObj); err == nil {
-				typeInferrer.AddSample("request:"+tx.Request.Method+":"+tx.Request.Path, bodyObj)
+			sanitized := sanitizeBodyForSchema(tx.Request.Body)
+			if sanitized != nil {
+				bodyObj := make(map[string]interface{})
+				if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
+					typeInferrer.AddSample("request:"+tx.Request.Method+":"+tx.Request.Path, bodyObj)
+				}
 			}
 		}
 
 		if tx.Response.Body != nil {
-			// Decode the response body from base64 if needed
-			decodedBody, err := maybeDecodeBase64(tx.Response.Body)
-			if err == nil {
+			sanitized := sanitizeBodyForSchema(tx.Response.Body)
+			if sanitized != nil {
 				// Try as object first
 				bodyObj := make(map[string]interface{})
-				if err := json.Unmarshal(decodedBody, &bodyObj); err == nil {
+				if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
 					typeInferrer.AddSample("response:"+tx.Request.Method+":"+tx.Request.Path, bodyObj)
 				} else {
 					// Try as array
 					var bodyArr []interface{}
-					if err := json.Unmarshal(decodedBody, &bodyArr); err == nil {
+					if err := json.Unmarshal(sanitized, &bodyArr); err == nil {
 						if len(bodyArr) > 0 {
-							// For arrays, add each item as a separate sample for better type inference
 							for _, item := range bodyArr {
 								typeInferrer.AddSample("response:"+tx.Request.Method+":"+tx.Request.Path+":item", item)
 							}
@@ -249,7 +315,7 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 	pathDetector.AnalyzePatterns()
 
 	// Second pass: generate paths and schemas
-	endpoints := make(map[string]map[string]bool) // path -> method -> bool
+	endpoints := make(map[string]map[string]map[int]bool) // path -> method -> statuscode -> bool
 
 	for _, tx := range g.transactions {
 		// Get the templated path
@@ -260,26 +326,35 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 
 		// Check if we've already processed this endpoint
 		if _, exists := endpoints[templatedPath]; !exists {
-			endpoints[templatedPath] = make(map[string]bool)
+			endpoints[templatedPath] = make(map[string]map[int]bool)
+		}
+		if _, exists := endpoints[templatedPath][tx.Request.Method]; !exists {
+			endpoints[templatedPath][tx.Request.Method] = make(map[int]bool)
 		}
 
-		// Skip if we've already processed this method
-		if endpoints[templatedPath][tx.Request.Method] {
-			// Add to schema merger for later merging
+		// Skip if we've already processed this method+status code
+		if endpoints[templatedPath][tx.Request.Method][tx.Response.StatusCode] {
+			// Add to schema merger for later merging using sanitized data
 			if tx.Request.Body != nil {
-				bodyObj := make(map[string]interface{})
-				if err := json.Unmarshal(tx.Request.Body, &bodyObj); err == nil {
-					if requestSchema, err := g.parseJSONBody(bodyObj); err == nil && requestSchema != nil {
-						schemaMerger.AddSchema(templatedPath, tx.Request.Method, *requestSchema)
+				sanitized := sanitizeBodyForSchema(tx.Request.Body)
+				if sanitized != nil {
+					bodyObj := make(map[string]interface{})
+					if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
+						if requestSchema, err := g.parseJSONBody(bodyObj); err == nil && requestSchema != nil {
+							schemaMerger.AddSchema(templatedPath, tx.Request.Method, *requestSchema)
+						}
 					}
 				}
 			}
 
 			if tx.Response.Body != nil {
-				bodyObj := make(map[string]interface{})
-				if err := json.Unmarshal(tx.Response.Body, &bodyObj); err == nil {
-					if responseSchema, err := g.parseJSONBody(bodyObj); err == nil && responseSchema != nil {
-						schemaMerger.AddSchema(templatedPath+":response", tx.Request.Method, *responseSchema)
+				sanitized := sanitizeBodyForSchema(tx.Response.Body)
+				if sanitized != nil {
+					bodyObj := make(map[string]interface{})
+					if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
+						if responseSchema, err := g.parseJSONBody(bodyObj); err == nil && responseSchema != nil {
+							schemaMerger.AddSchema(templatedPath+":response", tx.Request.Method, *responseSchema)
+						}
 					}
 				}
 			}
@@ -288,7 +363,7 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 		}
 
 		// Mark as processed
-		endpoints[templatedPath][tx.Request.Method] = true
+		endpoints[templatedPath][tx.Request.Method][tx.Response.StatusCode] = true
 
 		// Get or create the path item
 		pathItem := doc.Paths.Find(templatedPath)
@@ -297,10 +372,29 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 			doc.Paths.Set(templatedPath, pathItem)
 		}
 
-		// Create the operation
-		op := &openapi3.Operation{
-			Responses: openapi3.NewResponses(),
-			Tags:      []string{g.extractTagFromPath(templatedPath)},
+		// Get or create the operation
+		var op *openapi3.Operation
+		switch tx.Request.Method {
+		case "GET":
+			op = pathItem.Get
+		case "POST":
+			op = pathItem.Post
+		case "PUT":
+			op = pathItem.Put
+		case "DELETE":
+			op = pathItem.Delete
+		case "PATCH":
+			op = pathItem.Patch
+		case "HEAD":
+			op = pathItem.Head
+		case "OPTIONS":
+			op = pathItem.Options
+		}
+		if op == nil {
+			op = &openapi3.Operation{
+				Responses: openapi3.NewResponses(),
+				Tags:      []string{g.extractTagFromPath(templatedPath)},
+			}
 		}
 
 		// Extract path parameters
@@ -384,10 +478,16 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 
 		// Parse request body
 		var requestSchema *parser.Schema
+		var rawRequestBody map[string]interface{}
 		if tx.Request.Body != nil {
-			bodyObj := make(map[string]interface{})
-			if err := json.Unmarshal(tx.Request.Body, &bodyObj); err == nil {
-				requestSchema, _ = g.parseJSONBody(bodyObj)
+			if err := json.Unmarshal(tx.Request.Body, &rawRequestBody); err == nil {
+				sanitized := sanitizeBodyForSchema(tx.Request.Body)
+				if sanitized != nil {
+					bodyObj := make(map[string]interface{})
+					if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
+						requestSchema, _ = g.parseJSONBody(bodyObj)
+					}
+				}
 			}
 		}
 
@@ -397,11 +497,12 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 				contentType = "application/json"
 			}
 
-			// Apply type inference to improve schema quality
+			// Apply type inference using sanitized data
+			sanitized := sanitizeBodyForSchema(tx.Request.Body)
 			samples := []interface{}{}
-			if tx.Request.Body != nil {
+			if sanitized != nil {
 				bodyObj := make(map[string]interface{})
-				if err := json.Unmarshal(tx.Request.Body, &bodyObj); err == nil {
+				if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
 					samples = append(samples, bodyObj)
 				}
 			}
@@ -427,32 +528,37 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 
 		// Parse response
 		var responseSchema *parser.Schema
+		var rawResponseBody interface{}
 		if tx.Response.Body != nil {
 			// Decode the response body from base64 if needed
-			decodedBody, err := maybeDecodeBase64(tx.Response.Body)
-			if err == nil {
+			decodedBody := maybeDecodeBase64Bytes(tx.Response.Body)
+
+			// Sanitize for schema inference
+			sanitized := sanitizeBodyForSchema(decodedBody)
+			if sanitized != nil {
 				// Try as object first
 				bodyObj := make(map[string]interface{})
-				if err := json.Unmarshal(decodedBody, &bodyObj); err == nil {
+				if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
 					responseSchema, _ = g.parseJSONBody(bodyObj)
+					// Store raw for example
+					_ = json.Unmarshal(decodedBody, &rawResponseBody)
 				} else {
 					// Try as array
 					var bodyArr []interface{}
-					if err := json.Unmarshal(decodedBody, &bodyArr); err == nil {
+					if err := json.Unmarshal(sanitized, &bodyArr); err == nil {
 						if len(bodyArr) > 0 {
-							// Create array schema with the first item as a sample
 							itemSchema, _ := g.parseJSONBody(bodyArr[0])
 							if itemSchema != nil {
-								// For array items, use the first item as an example
-								// This ensures we have realistic example data
 								responseSchema = &parser.Schema{
-									Type:    "array",
-									Items:   itemSchema,
-									Example: bodyArr, // Use the actual array as an example
+									Type:  "array",
+									Items: itemSchema,
 								}
+								// Store raw array for example
+								var rawArr []interface{}
+								_ = json.Unmarshal(decodedBody, &rawArr)
+								rawResponseBody = rawArr
 							}
 						} else {
-							// Empty array - create a default array schema
 							responseSchema = &parser.Schema{
 								Type:  "array",
 								Items: &parser.Schema{Type: "string"},
@@ -470,21 +576,19 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 				contentType = "application/json"
 			}
 
-			// Apply type inference to improve schema quality
+			// Apply type inference using sanitized data
 			samples := []interface{}{}
-			if tx.Response.Body != nil {
-				// Try as object
+			sanitized := sanitizeBodyForSchema(tx.Response.Body)
+			if sanitized != nil {
 				bodyObj := make(map[string]interface{})
-				if err := json.Unmarshal(tx.Response.Body, &bodyObj); err == nil {
+				if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
 					samples = append(samples, bodyObj)
 				} else {
-					// Try as array of objects
 					var bodyArr []interface{}
-					if err := json.Unmarshal(tx.Response.Body, &bodyArr); err == nil {
-						// For arrays, preserve the whole array as an example
+					if err := json.Unmarshal(sanitized, &bodyArr); err == nil {
 						if responseSchema.Type == "array" && responseSchema.Items != nil {
-							// Keep the original response as an example
-							responseSchema.Example = bodyArr
+							// Use raw body for examples
+							responseSchema.Example = rawResponseBody
 						}
 					}
 				}
@@ -548,7 +652,8 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 
 	// Apply schema merging to improve schema quality
 	for path, methods := range endpoints {
-		for method := range methods {
+		for method, statusCodes := range methods {
+			_ = statusCodes
 			// Merge request schemas
 			mergedSchema := schemaMerger.MergeSchemas(path, method)
 

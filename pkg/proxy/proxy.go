@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -157,20 +156,13 @@ func captureRequest(r *http.Request) (RequestData, error) {
 		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 	}
 
-	// Sanitize the body to remove actual data values
-	sanitizedBody, err := sanitizeJSON(bodyBytes)
-	if err != nil {
-		// If there's an error sanitizing, still capture the request but with empty body
-		sanitizedBody = []byte{}
-	}
-
-	// Create a RequestData object with sanitized body
+	// Store raw body — sanitization happens during generation
 	reqData := RequestData{
 		Method:      r.Method,
 		Path:        r.URL.Path,
 		QueryParams: sanitizeQueryParams(r.URL.Query()),
 		Headers:     sanitizeHeaders(r.Header),
-		Body:        sanitizedBody,
+		Body:        bodyBytes,
 		Timestamp:   time.Now(),
 	}
 
@@ -224,44 +216,15 @@ func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 
 // captureResponse captures data from the response
 func captureResponse(rw *responseWriter) ResponseData {
-	// Check content type to determine if we should sanitize
+	// Store raw body — sanitization happens during generation
 	body := rw.body.Bytes()
-	sanitizedBody := body
-
-	contentType := ""
-	if ct := rw.ResponseWriter.Header().Get("Content-Type"); ct != "" {
-		if semicolon := strings.Index(ct, ";"); semicolon != -1 {
-			contentType = strings.TrimSpace(ct[:semicolon])
-		} else {
-			contentType = strings.TrimSpace(ct)
-		}
-	}
-
-	// Only sanitize JSON content types
-	if isJSONContentType(contentType) {
-		var err error
-		sanitizedBody, err = sanitizeJSON(body)
-		if err != nil {
-			sanitizedBody = []byte{}
-		}
-	} else if len(body) > 0 {
-		// For non-JSON, preserve the structure info but mark as non-JSON
-		sanitizedBody = []byte{}
-	}
 
 	return ResponseData{
 		StatusCode: rw.statusCode,
 		Headers:    sanitizeHeaders(rw.Header()),
-		Body:       sanitizedBody,
+		Body:       body,
 		Timestamp:  time.Now(),
 	}
-}
-
-// isJSONContentType checks if the content type is JSON
-func isJSONContentType(contentType string) bool {
-	return contentType == "application/json" ||
-		contentType == "text/json" ||
-		strings.HasSuffix(contentType, "+json")
 }
 
 // sanitizeJSON preserves the structure of JSON data but replaces values with type placeholders
