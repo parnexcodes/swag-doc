@@ -52,7 +52,10 @@ func (d *PathPatternDetector) AnalyzePatterns() {
 		// Analyze each group
 		for _, pathGroup := range pathsBySegmentCount {
 			if len(pathGroup) < 2 {
-				// Need at least 2 paths to detect a pattern
+				// Single observation: apply heuristic-based templatization
+				if len(pathGroup) == 1 {
+					d.templatizeSinglePath(pathGroup[0])
+				}
 				continue
 			}
 
@@ -61,6 +64,41 @@ func (d *PathPatternDetector) AnalyzePatterns() {
 
 		// Handle common REST patterns for resource IDs
 		d.detectCommonRESTPatterns(basePath, paths)
+	}
+}
+
+// templatizeSinglePath applies heuristic-based templatization for single observations
+func (d *PathPatternDetector) templatizeSinglePath(path string) {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	if len(segments) < 2 {
+		return
+	}
+
+	// Check each segment for potential parameters
+	modified := false
+	for i, segment := range segments {
+		// Numeric ID detection
+		if _, err := strconv.Atoi(segment); err == nil {
+			// If the previous segment is a known resource noun, templatize
+			if i > 0 {
+				segments[i] = "{id}"
+				modified = true
+			}
+			continue
+		}
+
+		// UUID detection
+		uuidPattern := regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
+		if uuidPattern.MatchString(segment) {
+			segments[i] = "{uuid}"
+			modified = true
+			continue
+		}
+	}
+
+	if modified {
+		pattern := "/" + strings.Join(segments, "/")
+		d.patterns[pattern] = "Resource identifier"
 	}
 }
 
@@ -155,6 +193,11 @@ func (d *PathPatternDetector) inferParameterType(values []string) (string, strin
 		uniqueValues[v] = struct{}{}
 	}
 
+	// Empty values should return a generic parameter
+	if len(uniqueValues) == 0 {
+		return "param", "Path parameter"
+	}
+
 	// Check if all values are numeric
 	allNumeric := true
 	for v := range uniqueValues {
@@ -232,33 +275,33 @@ func (d *PathPatternDetector) TemplatizePath(path string) string {
 		return path
 	}
 
-	basePath := segments[0]
-
-	// Try common patterns first
-	if len(segments) >= 2 {
+	// Try common patterns for all segments
+	modified := false
+	for i, segment := range segments {
 		// Check for numeric IDs
-		if _, err := strconv.Atoi(segments[1]); err == nil {
-			pattern := fmt.Sprintf("/%s/{id}", basePath)
-			if _, exists := d.patterns[pattern]; exists {
-				// Replace the numeric segment with {id}
-				segments[1] = "{id}"
-				// If there are more segments, check if they also match patterns
-				if len(segments) > 2 {
-					// TODO: Handle deeper patterns recursively
-				}
-				return "/" + strings.Join(segments, "/")
-			}
+		if _, err := strconv.Atoi(segment); err == nil {
+			segments[i] = "{id}"
+			modified = true
+			continue
 		}
 
 		// Check for UUIDs
 		uuidPattern := regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
-		if uuidPattern.MatchString(segments[1]) {
-			pattern := fmt.Sprintf("/%s/{uuid}", basePath)
-			if _, exists := d.patterns[pattern]; exists {
-				segments[1] = "{uuid}"
-				return "/" + strings.Join(segments, "/")
-			}
+		if uuidPattern.MatchString(segment) {
+			segments[i] = "{uuid}"
+			modified = true
+			continue
 		}
+
+		// Check if the segment matches a known pattern
+		partialPath := "/" + strings.Join(segments[:i+1], "/")
+		if _, exists := d.patterns[partialPath]; exists {
+			modified = true
+		}
+	}
+
+	if modified {
+		return "/" + strings.Join(segments, "/")
 	}
 
 	// If no pattern matches, return the original path

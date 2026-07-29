@@ -96,7 +96,8 @@ captured API transactions from the proxy server.`,
   swagdoc generate --tag-mapping "auth:Authentication" --tag-mapping "users:User Management"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return generateDocs(generateOutput, generateDataDir, generateTitle, generateDescription,
-				generateVersion, generateBasePath, generateCleanup)
+				generateVersion, generateBasePath, generateCleanup, generateUsePathGroups,
+				generateTagMapping, generateVersionPrefix)
 		},
 	}
 
@@ -148,17 +149,17 @@ PowerShell:
 `,
 		DisableFlagsInUseLine: true,
 		ValidArgs:             []string{"bash", "zsh", "fish", "powershell"},
-		Args:                  cobra.ExactValidArgs(1),
+		Args:                  cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
 		Run: func(cmd *cobra.Command, args []string) {
 			switch args[0] {
 			case "bash":
-				cmd.Root().GenBashCompletion(os.Stdout)
+				_ = cmd.Root().GenBashCompletion(os.Stdout)
 			case "zsh":
-				cmd.Root().GenZshCompletion(os.Stdout)
+				_ = cmd.Root().GenZshCompletion(os.Stdout)
 			case "fish":
-				cmd.Root().GenFishCompletion(os.Stdout, true)
+				_ = cmd.Root().GenFishCompletion(os.Stdout, true)
 			case "powershell":
-				cmd.Root().GenPowerShellCompletionWithDesc(os.Stdout)
+				_ = cmd.Root().GenPowerShellCompletionWithDesc(os.Stdout)
 			}
 		},
 	}
@@ -169,7 +170,7 @@ func init() {
 	proxyCmd.Flags().IntVarP(&proxyPort, "port", "p", 8080, "Port to run the proxy server on")
 	proxyCmd.Flags().StringVarP(&proxyTarget, "target", "t", "", "Target API server URL")
 	proxyCmd.Flags().StringVarP(&proxyDataDir, "data-dir", "d", defaultDataDir, "Directory to store API transaction data")
-	proxyCmd.MarkFlagRequired("target")
+	_ = proxyCmd.MarkFlagRequired("target")
 
 	// Add generate command flags
 	generateCmd.Flags().StringVarP(&generateOutput, "output", "o", "swagger.json", "Output file for Swagger documentation")
@@ -289,7 +290,7 @@ func selectBestTransaction(transactions []proxy.APITransaction) proxy.APITransac
 }
 
 // generateDocs generates Swagger/OpenAPI documentation from API transactions
-func generateDocs(output string, dataDir string, title string, description string, version string, basePath string, cleanup bool) error {
+func generateDocs(output string, dataDir string, title string, description string, version string, basePath string, cleanup bool, usePathGroups bool, tagMapping []string, versionPrefix []string) error {
 	// Print header
 	fmt.Println(logger.HighlightHeader(" SwagDoc Documentation Generator "))
 	logger.PrintInfo("Generating Swagger documentation to %s", output)
@@ -328,7 +329,7 @@ func generateDocs(output string, dataDir string, title string, description strin
 		Title:           title,
 		Description:     description,
 		Version:         version,
-		UsePathGroups:   generateUsePathGroups,
+		UsePathGroups:   usePathGroups,
 		TagMappings:     make(map[string]string),
 		VersionPrefixes: make(map[string]bool),
 		Servers: []openapi.OpenAPIServer{
@@ -340,7 +341,7 @@ func generateDocs(output string, dataDir string, title string, description strin
 	}
 
 	// Process tag mappings from command line
-	for _, mapping := range generateTagMapping {
+	for _, mapping := range tagMapping {
 		parts := strings.SplitN(mapping, ":", 2)
 		if len(parts) == 2 {
 			config.TagMappings[parts[0]] = parts[1]
@@ -348,7 +349,7 @@ func generateDocs(output string, dataDir string, title string, description strin
 	}
 
 	// Process version prefixes from command line
-	for _, prefix := range generateVersionPrefix {
+	for _, prefix := range versionPrefix {
 		config.VersionPrefixes[prefix] = true
 	}
 

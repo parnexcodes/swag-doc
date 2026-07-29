@@ -16,7 +16,7 @@ func TestProxyServer(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	}))
 	defer apiServer.Close()
 
@@ -68,7 +68,7 @@ func TestProxyServer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Error making request to API server: %v", err)
 		}
-		defer apiResp.Body.Close()
+		defer func() { _ = apiResp.Body.Close() }()
 
 		// Copy the API response to our response writer
 		for key, values := range apiResp.Header {
@@ -77,7 +77,7 @@ func TestProxyServer(t *testing.T) {
 			}
 		}
 		rw.WriteHeader(apiResp.StatusCode)
-		io.Copy(rw, apiResp.Body)
+		_, _ = io.Copy(rw, apiResp.Body)
 
 		// Capture the response
 		respData := captureResponse(rw)
@@ -102,7 +102,7 @@ func TestProxyServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error making request to proxy server: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Verify the interceptor was called
 	if !interceptorCalled {

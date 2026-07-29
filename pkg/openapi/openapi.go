@@ -4,12 +4,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/parnexcodes/swag-doc/pkg/parser"
 	"github.com/parnexcodes/swag-doc/pkg/proxy"
@@ -69,7 +70,7 @@ func (g *OpenAPIGenerator) AddTransaction(tx proxy.APITransaction) {
 
 // LoadTransactionsFromFile loads API transactions from a file
 func (g *OpenAPIGenerator) LoadTransactionsFromFile(filename string) error {
-	data, err := ioutil.ReadFile(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return err
 	}
@@ -85,7 +86,7 @@ func (g *OpenAPIGenerator) LoadTransactionsFromFile(filename string) error {
 
 // LoadTransactionsFromDirectory loads API transactions from all JSON files in a directory
 func (g *OpenAPIGenerator) LoadTransactionsFromDirectory(dirPath string) error {
-	files, err := ioutil.ReadDir(dirPath)
+	files, err := os.ReadDir(dirPath)
 	if err != nil {
 		return err
 	}
@@ -111,18 +112,26 @@ func (g *OpenAPIGenerator) GenerateSpec() (*OpenAPISpec, error) {
 
 // Helper function to decode Base64 response body if needed
 func maybeDecodeBase64(data []byte) ([]byte, error) {
-	// Check if data is base64 encoded
-	if len(data) > 0 && data[0] == 'W' {
-		// Try to decode base64
-		decoded, err := base64.StdEncoding.DecodeString(string(data))
-		if err == nil {
-			// If decoding worked and result looks like JSON, return it
-			if len(decoded) > 0 && (decoded[0] == '{' || decoded[0] == '[') {
-				return decoded, nil
-			}
+	if len(data) == 0 {
+		return data, nil
+	}
+
+	// Check if data looks like valid base64 by attempting to decode it
+	// Base64 encoded data has specific character set and padding requirements
+	decoded, err := base64.StdEncoding.DecodeString(string(data))
+	if err != nil {
+		// Try standard base64 without padding
+		decoded, err = base64.RawStdEncoding.DecodeString(string(data))
+		if err != nil {
+			return data, nil
 		}
 	}
-	// Return original data if not base64 or decode failed
+
+	// Only use decoded data if it looks like JSON
+	if len(decoded) > 0 && (decoded[0] == '{' || decoded[0] == '[') {
+		return decoded, nil
+	}
+
 	return data, nil
 }
 
@@ -622,9 +631,10 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 
 		// Add to document
 		key := scheme.Type
-		if scheme.Type == "http" {
+		switch scheme.Type {
+		case "http":
 			key = scheme.Scheme
-		} else if scheme.Type == "apiKey" {
+		case "apiKey":
 			key = "apiKey_" + scheme.Name
 		}
 
@@ -684,7 +694,7 @@ func (g *OpenAPIGenerator) parseJSONBody(body interface{}) (*parser.Schema, erro
 		for key, val := range v {
 			if propSchema, err := g.parseJSONBody(val); err == nil && propSchema != nil {
 				schema.Properties[key] = *propSchema
-				schema.Required = append(schema.Required, key)
+				// Do NOT add to Required here; required is determined after merging samples
 			}
 		}
 	case []interface{}:
@@ -990,7 +1000,7 @@ func (g *OpenAPIGenerator) isVersionPrefix(segment string) bool {
 	segment = strings.ToLower(segment)
 
 	// Use custom version prefixes if configured
-	if g.config.VersionPrefixes != nil && len(g.config.VersionPrefixes) > 0 {
+	if len(g.config.VersionPrefixes) > 0 {
 		return g.config.VersionPrefixes[segment]
 	}
 
@@ -1007,5 +1017,20 @@ func capitalize(s string) string {
 	if s == "" {
 		return "default"
 	}
-	return strings.Title(s)
+
+	// Replace hyphens and underscores with spaces, capitalize each word, then join
+	words := strings.FieldsFunc(s, func(r rune) bool {
+		return r == '-' || r == '_'
+	})
+
+	for i, word := range words {
+		if len(word) == 0 {
+			continue
+		}
+		runes := []rune(word)
+		runes[0] = unicode.ToUpper(runes[0])
+		words[i] = string(runes)
+	}
+
+	return strings.Join(words, " ")
 }

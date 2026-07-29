@@ -182,9 +182,10 @@ func TestParseParameters(t *testing.T) {
 			validateParams: func(t *testing.T, params []Parameter) {
 				var pathParam, queryParam *Parameter
 				for _, p := range params {
-					if p.In == "path" {
+					switch p.In {
+					case "path":
 						pathParam = &p
-					} else if p.In == "query" {
+					case "query":
 						queryParam = &p
 					}
 				}

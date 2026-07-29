@@ -17,8 +17,6 @@ var (
 
 	// Special color combinations for highlights
 	highlightSuccess = color.New(color.FgBlack, color.BgGreen)
-	highlightError   = color.New(color.FgBlack, color.BgRed)
-	highlightWarning = color.New(color.FgBlack, color.BgYellow)
 
 	// Status code colors
 	status2xxColor = color.New(color.FgGreen, color.Bold)
@@ -73,9 +71,9 @@ func PrintRequestLog(method, path string, statusCode int, contentType string) {
 
 	// Format the log
 	fmt.Printf("[%s] ", timeColor.Sprint(timestamp))
-	methodColor.Printf("%-6s", method)
+	_, _ = methodColor.Printf("%-6s", method)
 	fmt.Printf(" %-40s → ", path)
-	statusColorFunc.Printf("%d", statusCode)
+	_, _ = statusColorFunc.Printf("%d", statusCode)
 	fmt.Printf(" (%s)\n", contentType)
 }
 
@@ -101,7 +99,7 @@ func PrintStartupBanner(port int, target, dataDir string) {
 		color.New(color.FgGreen, color.Bold).Sprint("✓ Data Directory:"),
 		dataDir)
 
-	highlightSuccess.Println(" READY TO CAPTURE API TRAFFIC ")
+	_, _ = highlightSuccess.Println(" READY TO CAPTURE API TRAFFIC ")
 	fmt.Println(color.New(color.FgWhite).Sprint("------------------------------------------"))
 }
 
@@ -111,7 +109,7 @@ func printWithPrefix(colorFunc *color.Color, prefix, format string, args ...inte
 	timeColor := color.New(color.FgWhite)
 
 	fmt.Printf("[%s] ", timeColor.Sprint(timestamp))
-	colorFunc.Printf("[%s] ", prefix)
+	_, _ = colorFunc.Printf("[%s] ", prefix)
 	fmt.Printf(format+"\n", args...)
 }
 

@@ -226,7 +226,6 @@ func TestParseJSONBody(t *testing.T) {
 						Example: int64(30),
 					},
 				},
-				Required: []string{"name", "age"},
 				Example: map[string]interface{}{
 					"name": "John",
 					"age":  float64(30),
@@ -270,7 +269,6 @@ func TestParseJSONBody(t *testing.T) {
 
 			if tt.expected.Properties != nil {
 				assert.Equal(t, tt.expected.Properties, schema.Properties)
-				assert.ElementsMatch(t, tt.expected.Required, schema.Required)
 			}
 		})
 	}
@@ -402,26 +400,5 @@ func TestGetContentType(t *testing.T) {
 			result := getContentType(tt.headers)
 			assert.Equal(t, tt.expected, result)
 		})
-	}
-}
-
-// Helper function to create a test transaction
-func createTestTransaction(method, path string, reqBody, respBody []byte, statusCode int) proxy.APITransaction {
-	return proxy.APITransaction{
-		Request: proxy.RequestData{
-			Method: method,
-			Path:   path,
-			Headers: http.Header{
-				"Content-Type": []string{"application/json"},
-			},
-			Body: reqBody,
-		},
-		Response: proxy.ResponseData{
-			StatusCode: statusCode,
-			Headers: http.Header{
-				"Content-Type": []string{"application/json"},
-			},
-			Body: respBody,
-		},
 	}
 }

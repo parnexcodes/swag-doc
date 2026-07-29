@@ -23,6 +23,7 @@ type FileStorage struct {
 	baseDir      string
 	sessionFile  string
 	transactions []APITransaction
+	file         *os.File
 	mutex        sync.Mutex
 }
 
@@ -33,13 +34,26 @@ func NewFileStorage(baseDir string) (*FileStorage, error) {
 		return nil, err
 	}
 
-	// Generate a timestamp-based session filename
-	sessionFile := filepath.Join(baseDir, fmt.Sprintf("session-%s.json", time.Now().Format("20060102-150405")))
+	// Generate a timestamp-based session filename with PID to avoid collisions
+	sessionFile := filepath.Join(baseDir, fmt.Sprintf("session-%s-%d.json",
+		time.Now().Format("20060102-150405"), os.Getpid()))
+
+	// Create the file and write the opening bracket
+	f, err := os.Create(sessionFile)
+	if err != nil {
+		return nil, fmt.Errorf("creating session file: %w", err)
+	}
+	// Write the opening bracket for JSON array
+	if _, err := f.WriteString("[\n"); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("writing session file header: %w", err)
+	}
 
 	return &FileStorage{
 		baseDir:      baseDir,
 		sessionFile:  sessionFile,
 		transactions: []APITransaction{},
+		file:         f,
 	}, nil
 }
 
@@ -51,14 +65,40 @@ func (s *FileStorage) Store(transaction APITransaction) error {
 	// Add transaction to in-memory list
 	s.transactions = append(s.transactions, transaction)
 
-	// Write all transactions to the session file
-	data, err := json.MarshalIndent(s.transactions, "", "  ")
+	// Append single transaction as JSON to the file (JSON Lines style)
+	data, err := json.Marshal(transaction)
 	if err != nil {
 		return err
 	}
 
-	// Write to file
-	return os.WriteFile(s.sessionFile, data, 0644)
+	// Write comma separator if not the first entry
+	if len(s.transactions) > 1 {
+		if _, err := s.file.WriteString(",\n"); err != nil {
+			return err
+		}
+	}
+
+	if _, err := s.file.Write(data); err != nil {
+		return err
+	}
+
+	return s.file.Sync()
+}
+
+// Close finalizes the session file
+func (s *FileStorage) Close() error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if s.file != nil {
+		// Write the closing bracket
+		if _, err := s.file.WriteString("\n]\n"); err != nil {
+			_ = s.file.Close()
+			return err
+		}
+		return s.file.Close()
+	}
+	return nil
 }
 
 // GetAll returns all stored API transactions

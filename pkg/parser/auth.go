@@ -259,10 +259,11 @@ func (d *AuthDetector) GetAuthSchemes() []AuthScheme {
 	return schemes
 }
 
-// contains checks if a string is in a slice
+// contains checks if a string is in a slice (case-insensitive)
 func contains(slice []string, s string) bool {
+	lower := strings.ToLower(s)
 	for _, item := range slice {
-		if item == s {
+		if strings.ToLower(item) == lower {
 			return true
 		}
 	}

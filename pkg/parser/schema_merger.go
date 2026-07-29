@@ -100,22 +100,18 @@ func mergeObjectProperties(aProps, bProps map[string]Schema) map[string]Schema {
 	result := make(map[string]Schema)
 
 	// Copy properties from a
-	if aProps != nil {
-		for name, schema := range aProps {
-			result[name] = schema
-		}
+	for name, schema := range aProps {
+		result[name] = schema
 	}
 
 	// Merge in properties from b
-	if bProps != nil {
-		for name, schema := range bProps {
-			if existingSchema, exists := result[name]; exists {
-				// Property exists in both - merge the schemas
-				result[name] = mergeSchema(existingSchema, schema)
-			} else {
-				// Property only in b - add it
-				result[name] = schema
-			}
+	for name, schema := range bProps {
+		if existingSchema, exists := result[name]; exists {
+			// Property exists in both - merge the schemas
+			result[name] = mergeSchema(existingSchema, schema)
+		} else {
+			// Property only in b - add it
+			result[name] = schema
 		}
 	}
 

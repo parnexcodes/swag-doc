@@ -54,7 +54,7 @@ func handleUsers(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		// Return all users
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(users)
+		_ = json.NewEncoder(w).Encode(users)
 	case http.MethodPost:
 		// Create a new user
 		var user User
@@ -69,7 +69,7 @@ func handleUsers(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(user)
+		_ = json.NewEncoder(w).Encode(user)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -89,7 +89,7 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		// Return the user
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(user)
+		_ = json.NewEncoder(w).Encode(user)
 	case http.MethodPut:
 		// Update the user
 		var updatedUser User
@@ -103,7 +103,7 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 		users[id-1] = updatedUser
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(updatedUser)
+		_ = json.NewEncoder(w).Encode(updatedUser)
 	case http.MethodDelete:
 		// Delete the user
 		users = append(users[:id-1], users[id:]...)
@@ -118,7 +118,7 @@ func handlePosts(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		// Return all posts
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(posts)
+		_ = json.NewEncoder(w).Encode(posts)
 	case http.MethodPost:
 		// Create a new post
 		var post Post
@@ -133,7 +133,7 @@ func handlePosts(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(post)
+		_ = json.NewEncoder(w).Encode(post)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -153,7 +153,7 @@ func handlePost(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		// Return the post
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(post)
+		_ = json.NewEncoder(w).Encode(post)
 	case http.MethodPut:
 		// Update the post
 		var updatedPost Post
@@ -167,7 +167,7 @@ func handlePost(w http.ResponseWriter, r *http.Request) {
 		posts[id-1] = updatedPost
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(updatedPost)
+		_ = json.NewEncoder(w).Encode(updatedPost)
 	case http.MethodDelete:
 		// Delete the post
 		posts = append(posts[:id-1], posts[id:]...)

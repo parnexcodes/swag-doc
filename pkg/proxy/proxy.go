@@ -1,14 +1,22 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/parnexcodes/swag-doc/pkg/logger"
@@ -66,7 +74,7 @@ func NewProxyServer(port int, target string, interceptor APIInterceptor) (*Proxy
 	}, nil
 }
 
-// Start starts the proxy server
+// Start starts the proxy server with graceful shutdown support
 func (p *ProxyServer) Start() error {
 	// Create a custom handler that wraps the proxy
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -102,10 +110,37 @@ func (p *ProxyServer) Start() error {
 		}
 	})
 
-	// Start the server
 	addr := fmt.Sprintf(":%d", p.port)
-	log.Printf("Starting proxy server on %s", addr)
-	return http.ListenAndServe(addr, handler)
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: handler,
+	}
+
+	// Channel to receive errors from the server
+	errChan := make(chan error, 1)
+
+	// Start server in a goroutine
+	go func() {
+		log.Printf("Starting proxy server on %s", addr)
+		errChan <- srv.ListenAndServe()
+	}()
+
+	// Listen for interrupt signals for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-errChan:
+		return err
+	case sig := <-sigChan:
+		log.Printf("Received signal %v, shutting down gracefully...", sig)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			return fmt.Errorf("server shutdown error: %w", err)
+		}
+		return nil
+	}
 }
 
 // captureRequest captures data from an HTTP request
@@ -113,7 +148,11 @@ func captureRequest(r *http.Request) (RequestData, error) {
 	// Read the request body
 	var bodyBytes []byte
 	if r.Body != nil {
-		bodyBytes, _ = io.ReadAll(r.Body)
+		var err error
+		bodyBytes, err = io.ReadAll(r.Body)
+		if err != nil {
+			return RequestData{}, fmt.Errorf("reading request body: %w", err)
+		}
 		// Restore the body for further processing
 		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 	}
@@ -168,21 +207,61 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	return rw.ResponseWriter.Write(b)
 }
 
+// Flush implements http.Flusher for SSE/streaming support
+func (rw *responseWriter) Flush() {
+	if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// Hijack implements http.Hijacker for WebSocket support
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hijacker, ok := rw.ResponseWriter.(http.Hijacker); ok {
+		return hijacker.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not support Hijack")
+}
+
 // captureResponse captures data from the response
 func captureResponse(rw *responseWriter) ResponseData {
-	// Sanitize the body to remove actual data values
-	sanitizedBody, err := sanitizeJSON(rw.body.Bytes())
-	if err != nil {
-		// If there's an error sanitizing, still capture the response but with empty body
+	// Check content type to determine if we should sanitize
+	body := rw.body.Bytes()
+	sanitizedBody := body
+
+	contentType := ""
+	if ct := rw.ResponseWriter.Header().Get("Content-Type"); ct != "" {
+		if semicolon := strings.Index(ct, ";"); semicolon != -1 {
+			contentType = strings.TrimSpace(ct[:semicolon])
+		} else {
+			contentType = strings.TrimSpace(ct)
+		}
+	}
+
+	// Only sanitize JSON content types
+	if isJSONContentType(contentType) {
+		var err error
+		sanitizedBody, err = sanitizeJSON(body)
+		if err != nil {
+			sanitizedBody = []byte{}
+		}
+	} else if len(body) > 0 {
+		// For non-JSON, preserve the structure info but mark as non-JSON
 		sanitizedBody = []byte{}
 	}
 
 	return ResponseData{
 		StatusCode: rw.statusCode,
-		Headers:    sanitizeHeaders(rw.ResponseWriter.Header()),
+		Headers:    sanitizeHeaders(rw.Header()),
 		Body:       sanitizedBody,
 		Timestamp:  time.Now(),
 	}
+}
+
+// isJSONContentType checks if the content type is JSON
+func isJSONContentType(contentType string) bool {
+	return contentType == "application/json" ||
+		contentType == "text/json" ||
+		strings.HasSuffix(contentType, "+json")
 }
 
 // sanitizeJSON preserves the structure of JSON data but replaces values with type placeholders
@@ -217,8 +296,16 @@ func sanitizeValue(value interface{}) interface{} {
 		if len(v) == 0 {
 			return []interface{}{}
 		}
-		// For arrays, we only need one sample to infer schema
-		return []interface{}{sanitizeValue(v[0])}
+		// Keep up to 5 elements for better schema inference
+		maxElements := 5
+		if len(v) < maxElements {
+			maxElements = len(v)
+		}
+		result := make([]interface{}, maxElements)
+		for i := 0; i < maxElements; i++ {
+			result[i] = sanitizeValue(v[i])
+		}
+		return result
 	case string:
 		return "__string__"
 	case float64:
@@ -290,13 +377,30 @@ func sanitizeQueryParams(params url.Values) url.Values {
 			sanitized[key] = []string{"__redacted__"}
 		} else {
 			newValues := make([]string, len(values))
-			for i := range values {
-				newValues[i] = "__string__"
+			for i, v := range values {
+				newValues[i] = sanitizeQueryParamValue(v)
 			}
 			sanitized[key] = newValues
 		}
 	}
 	return sanitized
+}
+
+// sanitizeQueryParamValue infers the type of a query parameter value and returns a placeholder
+func sanitizeQueryParamValue(value string) string {
+	// Check for boolean
+	if value == "true" || value == "false" {
+		return "__boolean__"
+	}
+	// Check for integer
+	if _, err := strconv.Atoi(value); err == nil {
+		return "__integer__"
+	}
+	// Check for float
+	if _, err := strconv.ParseFloat(value, 64); err == nil {
+		return "__number__"
+	}
+	return "__string__"
 }
 
 // logTransaction logs the captured transaction details to the console
