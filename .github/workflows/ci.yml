@@ -29,7 +29,7 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v2.12
 
   vulncheck:
     name: Vulnerability Check
@@ -66,13 +66,12 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run tests (Unix)
-        if: runner.os != 'Windows'
-        run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Run tests
+        run: go test -v -race -count=1 ./...
 
-      - name: Run tests (Windows)
-        if: runner.os == 'Windows'
-        run: go test -v -race -coverprofile=coverage.out -covermode=atomic ".\..."
+      - name: Generate coverage (Ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage
         if: matrix.os == 'ubuntu-latest'
