@@ -151,6 +151,12 @@ func (s *FileStorage) Clear() error {
 	// Reset in-memory transactions
 	s.transactions = []APITransaction{}
 
+	// Close the session file before removing (required on Windows)
+	if s.file != nil {
+		_ = s.file.Close()
+		s.file = nil
+	}
+
 	// Remove all files from the directory
 	files, err := os.ReadDir(s.baseDir)
 	if err != nil {
