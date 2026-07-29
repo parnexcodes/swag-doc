@@ -58,7 +58,7 @@ changelog:
 release:
   github:
     owner: parnexcodes
-    name: swagdoc
+    name: swag-doc
   draft: false
   prerelease: auto
   name_template: "v{{ .Version }}"
