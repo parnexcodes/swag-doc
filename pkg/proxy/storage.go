@@ -62,17 +62,14 @@ func (s *FileStorage) Store(transaction APITransaction) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	// Add transaction to in-memory list
-	s.transactions = append(s.transactions, transaction)
-
-	// Append single transaction as JSON to the file (JSON Lines style)
+	// Marshal first — fail fast before any side effects
 	data, err := json.Marshal(transaction)
 	if err != nil {
 		return err
 	}
 
 	// Write comma separator if not the first entry
-	if len(s.transactions) > 1 {
+	if len(s.transactions) > 0 {
 		if _, err := s.file.WriteString(",\n"); err != nil {
 			return err
 		}
@@ -82,7 +79,13 @@ func (s *FileStorage) Store(transaction APITransaction) error {
 		return err
 	}
 
-	return s.file.Sync()
+	if err := s.file.Sync(); err != nil {
+		return err
+	}
+
+	// Only append to in-memory list after successful write
+	s.transactions = append(s.transactions, transaction)
+	return nil
 }
 
 // Close finalizes the session file

@@ -212,6 +212,11 @@ func runProxy(port int, target string, dataDir string) error {
 		logger.PrintError("Failed to create storage: %v", err)
 		return fmt.Errorf("failed to create storage: %v", err)
 	}
+	defer func() {
+		if err := storage.Close(); err != nil {
+			logger.PrintError("Failed to close storage: %v", err)
+		}
+	}()
 
 	// Create interceptor function
 	interceptor := proxy.TransactionInterceptor(storage)

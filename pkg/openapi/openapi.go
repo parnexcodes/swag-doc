@@ -110,33 +110,26 @@ func (g *OpenAPIGenerator) GenerateSpec() (*OpenAPISpec, error) {
 	return g.generateAPI()
 }
 
-// Helper function to decode Base64 response body if needed
-func maybeDecodeBase64(data []byte) ([]byte, error) {
+// maybeDecodeBase64 decodes a Base64-encoded response body if needed.
+// Returns the decoded bytes if they represent JSON, otherwise returns the original data.
+func maybeDecodeBase64(data []byte) []byte {
 	if len(data) == 0 {
-		return data, nil
+		return data
 	}
 
-	// Check if data looks like valid base64 by attempting to decode it
 	decoded, err := base64.StdEncoding.DecodeString(string(data))
 	if err != nil {
 		decoded, err = base64.RawStdEncoding.DecodeString(string(data))
 		if err != nil {
-			return data, nil
+			return data
 		}
 	}
 
-	// Only use decoded data if it looks like JSON
 	if len(decoded) > 0 && (decoded[0] == '{' || decoded[0] == '[') {
-		return decoded, nil
+		return decoded
 	}
 
-	return data, nil
-}
-
-// maybeDecodeBase64Bytes is like maybeDecodeBase64 but returns just the bytes
-func maybeDecodeBase64Bytes(data []byte) []byte {
-	result, _ := maybeDecodeBase64(data)
-	return result
+	return data
 }
 
 // sanitizeBodyForSchema sanitizes a raw JSON body into type placeholders for schema inference.
@@ -531,7 +524,7 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 		var rawResponseBody interface{}
 		if tx.Response.Body != nil {
 			// Decode the response body from base64 if needed
-			decodedBody := maybeDecodeBase64Bytes(tx.Response.Body)
+			decodedBody := maybeDecodeBase64(tx.Response.Body)
 
 			// Sanitize for schema inference
 			sanitized := sanitizeBodyForSchema(decodedBody)

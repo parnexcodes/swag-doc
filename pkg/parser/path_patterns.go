@@ -278,11 +278,13 @@ func (d *PathPatternDetector) TemplatizePath(path string) string {
 	// Try common patterns for all segments
 	modified := false
 	for i, segment := range segments {
-		// Check for numeric IDs
-		if _, err := strconv.Atoi(segment); err == nil {
-			segments[i] = "{id}"
-			modified = true
-			continue
+		// Check for numeric IDs (skip first segment — it's likely a resource name)
+		if i > 0 {
+			if _, err := strconv.Atoi(segment); err == nil {
+				segments[i] = "{id}"
+				modified = true
+				continue
+			}
 		}
 
 		// Check for UUIDs
