@@ -7,10 +7,10 @@ import (
 	"strings"
 
 	"github.com/parnexcodes/swag-doc/pkg/asyncapi"
+	"github.com/parnexcodes/swag-doc/pkg/graphql"
 	"github.com/parnexcodes/swag-doc/pkg/logger"
 	"github.com/parnexcodes/swag-doc/pkg/openapi"
 	"github.com/parnexcodes/swag-doc/pkg/proxy"
-
 	"github.com/spf13/cobra"
 )
 
@@ -196,7 +196,7 @@ func init() {
 	generateCmd.Flags().BoolVar(&generateUsePathGroups, "group-by-path", true, "Group API endpoints by path segments")
 	generateCmd.Flags().StringSliceVar(&generateTagMapping, "tag-mapping", []string{}, "Custom tag mappings in format 'path:tag' (can be used multiple times)")
 	generateCmd.Flags().StringSliceVar(&generateVersionPrefix, "version-prefix", []string{}, "Custom version prefixes (can be used multiple times)")
-	generateCmd.Flags().StringVar(&generateFormat, "format", "openapi", "Documentation format to generate: openapi or asyncapi")
+	generateCmd.Flags().StringVar(&generateFormat, "format", "openapi", "Documentation format to generate: openapi, asyncapi, or graphql")
 
 	// Add commands to root
 	rootCmd.AddCommand(proxyCmd)
@@ -313,7 +313,7 @@ func selectBestTransaction(transactions []proxy.APITransaction) proxy.APITransac
 }
 
 // generateDocs generates documentation from captured API transactions in the
-// requested format (openapi or asyncapi) and writes it to output.
+// requested format (openapi, asyncapi, or graphql) and writes it to output.
 func generateDocs(output string, dataDir string, title string, description string, version string, basePath string, cleanup bool, usePathGroups bool, tagMapping []string, versionPrefix []string, format string) error {
 	// Print header
 	fmt.Println(logger.HighlightHeader(" SwagDoc Documentation Generator "))
@@ -331,10 +331,12 @@ func generateDocs(output string, dataDir string, title string, description strin
 	switch format {
 	case "asyncapi":
 		genErr = generateAsyncAPIDocs(absOutput, dataDir, title, description, version, basePath)
+	case "graphql":
+		genErr = generateGraphQLDocs(absOutput, dataDir, title, description, version)
 	case "openapi":
 		genErr = generateOpenAPIDocs(absOutput, dataDir, title, description, version, basePath, usePathGroups, tagMapping, versionPrefix)
 	default:
-		genErr = fmt.Errorf("unknown format %q: must be openapi or asyncapi", format)
+		genErr = fmt.Errorf("unknown format %q: must be openapi, asyncapi, or graphql", format)
 	}
 	if genErr != nil {
 		return genErr
@@ -526,5 +528,55 @@ func generateAsyncAPIDocs(absOutput string, dataDir string, title string, descri
 	}
 
 	logger.PrintSuccess("AsyncAPI documentation generated successfully: %s", absOutput)
+	return nil
+}
+
+// generateGraphQLDocs writes a GraphQL SDL document to absOutput.
+func generateGraphQLDocs(absOutput string, dataDir string, title string, description string, version string) error {
+	storage, err := proxy.NewFileStorageReader(dataDir)
+	if err != nil {
+		logger.PrintError("Failed to create storage: %v", err)
+		return fmt.Errorf("failed to create storage: %v", err)
+	}
+	defer func() {
+		if err := storage.Close(); err != nil {
+			logger.PrintError("Failed to close storage: %v", err)
+		}
+	}()
+
+	transactions, err := storage.GetAll()
+	if err != nil {
+		logger.PrintError("Failed to read API transactions: %v", err)
+		return fmt.Errorf("failed to read API transactions: %v", err)
+	}
+	logger.PrintInfo("Found %d API transactions across all session files", len(transactions))
+
+	generator := graphql.NewGenerator(graphql.Config{
+		Title:       title,
+		Description: description,
+		Version:     version,
+	})
+	for _, transaction := range transactions {
+		generator.AddTransaction(transaction)
+	}
+
+	schema, err := generator.Generate()
+	if err != nil {
+		logger.PrintError("Failed to generate GraphQL schema: %v", err)
+		return fmt.Errorf("failed to generate GraphQL schema: %v", err)
+	}
+
+	outDir := filepath.Dir(absOutput)
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		logger.PrintError("Failed to create output directory: %v", err)
+		return fmt.Errorf("failed to create output directory: %v", err)
+	}
+
+	if err := os.WriteFile(absOutput, []byte(schema), 0644); err != nil {
+		logger.PrintError("Failed to write GraphQL schema: %v", err)
+		return fmt.Errorf("failed to write GraphQL schema: %v", err)
+	}
+
+	logger.PrintSuccess("GraphQL schema generated successfully: %s", absOutput)
 	return nil
 }

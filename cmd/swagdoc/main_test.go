@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -208,8 +209,79 @@ func TestGenerateDocsRejectsUnknownFormat(t *testing.T) {
 	outDir := t.TempDir()
 	out := filepath.Join(outDir, "out.json")
 	err := generateDocs(out, dataDir, "Test API", "Test Description", "1.0.0",
-		"http://localhost:8080", false, true, nil, nil, "graphql")
+		"http://localhost:8080", false, true, nil, nil, "grpc")
 	require.Error(t, err)
 	_, statErr := os.Stat(out)
 	assert.True(t, os.IsNotExist(statErr), "no output file must be created for an unknown format")
+}
+func writeGraphQLTransactionFile(t *testing.T, dir string) {
+	t.Helper()
+	query := map[string]any{
+		"query":     `query GetUser($id: ID!) { user(id: $id) { id name } }`,
+		"variables": map[string]any{"id": "1"},
+	}
+	requestBody, err := json.Marshal(query)
+	require.NoError(t, err)
+	transactions := []proxy.APITransaction{{
+		Request: proxy.RequestData{
+			Method:  http.MethodPost,
+			Path:    "/graphql",
+			Headers: http.Header{"Content-Type": []string{"application/json"}},
+			Body:    requestBody,
+		},
+		Response: proxy.ResponseData{
+			StatusCode: 200,
+			Headers:    http.Header{"Content-Type": []string{"application/json"}},
+			Body:       []byte(`{"data":{"user":{"id":"u1","name":"alice"}}}`),
+		},
+	}}
+	data, err := json.Marshal(transactions)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "session-graphql.json"), data, 0o644))
+}
+
+func TestGenerateDocsGraphQLOutput(t *testing.T) {
+	dataDir := t.TempDir()
+	writeGraphQLTransactionFile(t, dataDir)
+	outDir := t.TempDir()
+	firstPath := filepath.Join(outDir, "schema.graphql")
+	secondPath := filepath.Join(outDir, "schema-second.graphql")
+
+	require.NoError(t, generateDocs(firstPath, dataDir, "Test API", "Test Description", "1.0.0",
+		"http://localhost:8080", false, true, nil, nil, "graphql"))
+	require.NoError(t, generateDocs(secondPath, dataDir, "Test API", "Test Description", "1.0.0",
+		"http://localhost:8080", false, true, nil, nil, "graphql"))
+
+	first, err := os.ReadFile(firstPath)
+	require.NoError(t, err)
+	second, err := os.ReadFile(secondPath)
+	require.NoError(t, err)
+	assert.Equal(t, first, second, "GraphQL generation must be deterministic")
+	assert.Contains(t, string(first), "type Query")
+	assert.Contains(t, string(first), "user(id: ID!): User")
+	assert.NotContains(t, string(first), "alice")
+	assert.NotContains(t, string(first), "u1")
+}
+
+func TestGenerateDocsGraphQLCleanup(t *testing.T) {
+	dataDir := t.TempDir()
+	writeGraphQLTransactionFile(t, dataDir)
+	out := filepath.Join(t.TempDir(), "schema.graphql")
+	require.NoError(t, generateDocs(out, dataDir, "Test API", "Test Description", "1.0.0",
+		"http://localhost:8080", true, true, nil, nil, "graphql"))
+	_, err := os.Stat(dataDir)
+	assert.Error(t, err)
+}
+
+func TestGenerateGraphQLDocsWriteFailureLeavesNoOutput(t *testing.T) {
+	dataDir := t.TempDir()
+	writeGraphQLTransactionFile(t, dataDir)
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	require.NoError(t, os.WriteFile(blocker, []byte("blocker"), 0o644))
+	out := filepath.Join(blocker, "schema.graphql")
+	err := generateDocs(out, dataDir, "Test API", "Test Description", "1.0.0",
+		"http://localhost:8080", false, true, nil, nil, "graphql")
+	require.Error(t, err)
+	_, statErr := os.Stat(out)
+	assert.Error(t, statErr, "failed generation must not create output")
 }

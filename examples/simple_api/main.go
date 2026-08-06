@@ -47,6 +47,7 @@ func main() {
 	http.HandleFunc("/users/", handleUser)
 	http.HandleFunc("/posts", handlePosts)
 	http.HandleFunc("/posts/", handlePost)
+	http.HandleFunc("/graphql", handleGraphQL)
 	http.HandleFunc("/ws", handleWS)
 
 	// Start server
@@ -143,6 +144,76 @@ func handlePosts(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(post)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+func handleGraphQL(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "GraphQL endpoint requires POST", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request struct {
+		Query     string         `json:"query"`
+		Variables map[string]any `json:"variables"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	query := strings.ToLower(request.Query)
+	var data map[string]any
+	switch {
+	case strings.Contains(query, "createuser"):
+		input, _ := request.Variables["input"].(map[string]any)
+		user := User{
+			ID:        len(users) + 1,
+			Username:  stringVariable(input, "username"),
+			Email:     stringVariable(input, "email"),
+			FirstName: stringVariable(input, "first_name"),
+			LastName:  stringVariable(input, "last_name"),
+		}
+		users = append(users, user)
+		data = map[string]any{"createUser": user}
+	case strings.Contains(query, "posts"):
+		data = map[string]any{"posts": posts}
+	case strings.Contains(query, "user"):
+		id := intVariable(request.Variables, "id")
+		if id <= 0 || id > len(users) {
+			data = map[string]any{"user": nil}
+		} else {
+			data = map[string]any{"user": users[id-1]}
+		}
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"errors": []map[string]string{{"message": "unsupported example query"}},
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+}
+
+func stringVariable(values map[string]any, name string) string {
+	value, _ := values[name].(string)
+	return value
+}
+
+func intVariable(values map[string]any, name string) int {
+	switch value := values[name].(type) {
+	case float64:
+		return int(value)
+	case int:
+		return value
+	case string:
+		var result int
+		_, _ = fmt.Sscanf(value, "%d", &result)
+		return result
+	default:
+		return 1
 	}
 }
 

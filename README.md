@@ -83,7 +83,7 @@ swagdoc generate --output swagger.json
 | `--group-by-path` | Group API endpoints by path segments | `true` |
 | `--tag-mapping` | Custom tag mappings in format `path:tag` | |
 | `--version-prefix` | Custom version prefixes | |
-| `--format` | Documentation format to generate: `openapi` or `asyncapi` | `openapi` |
+| `--format` | Documentation format to generate: `openapi`, `asyncapi`, or `graphql` | `openapi` |
 
 #### Version Command
 
@@ -106,6 +106,19 @@ swagdoc generate --format asyncapi --output asyncapi.json
 - YAML output works the same as for OpenAPI: a `.yaml`/`.yml` output path produces YAML.
 
 Captured WebSocket sessions are stored in `ws-session-*.json` files, separate from HTTP `session-*.json` files; OpenAPI generation ignores them, so `swagger.json` output is unaffected by WebSocket traffic. Compressed (permessage-deflate) payloads are captured as-is and documented as binary.
+
+### GraphQL API Documentation
+
+SwagDoc can infer a GraphQL schema from captured HTTP requests and emit standard GraphQL SDL:
+
+```bash
+swagdoc generate --format graphql --output schema.graphql
+```
+
+- GraphQL requests are detected from `application/graphql` bodies, JSON bodies with a parseable `query` field, and URL-encoded `query` fields. Queries, mutations, subscriptions, variables, aliases, fragments, response object types, lists, and scalar fields are merged across observations.
+- The output contains `Query`, `Mutation`, and `Subscription` root fields, named object types, input types inferred from variables, and conservative nullable response fields. It contains type structure only; captured values are never emitted.
+- SDL output is plain text regardless of the output filename extension. `.graphql` or `.gql` is recommended.
+- GraphQL-over-GET requests are not detected because query parameters are sanitized during capture. GraphQL-over-WebSocket subscription messages remain part of the AsyncAPI workflow rather than this SDL generator.
 
 ### Organizing API Documentation
 
@@ -166,14 +179,13 @@ git push origin v1.0.0
 make demo
 ```
 
-This starts the example API, proxies to it, sends sample requests and WebSocket messages, generates `swagger.json` and `asyncapi.json`, and stops the servers.
+This starts the example API, proxies to it, sends sample HTTP, GraphQL, and WebSocket messages, generates `swagger.json`, `asyncapi.json`, and `schema.graphql`, and stops the servers.
 
 ## Future Features
 
 - Framework-specific middleware (Express, Gin, FastAPI, etc.)
 - Interactive UI for viewing and editing generated docs
 - gRPC support
-- GraphQL support
 
 ## Contributing
 
