@@ -27,9 +27,10 @@ var (
 
 var (
 	// Proxy command flags
-	proxyPort    int
-	proxyTarget  string
-	proxyDataDir string
+	proxyPort         int
+	proxyTarget       string
+	proxyDataDir      string
+	proxyMaxBodyBytes int64
 
 	// Generate command flags
 	generateOutput        string
@@ -79,7 +80,7 @@ type placeholders to ensure privacy and security.`,
 			if proxyTarget == "" {
 				return fmt.Errorf("target API server URL is required")
 			}
-			return runProxy(proxyPort, proxyTarget, proxyDataDir)
+			return runProxy(proxyPort, proxyTarget, proxyDataDir, proxyMaxBodyBytes)
 		},
 	}
 
@@ -176,6 +177,7 @@ func init() {
 	proxyCmd.Flags().IntVarP(&proxyPort, "port", "p", 8080, "Port to run the proxy server on")
 	proxyCmd.Flags().StringVarP(&proxyTarget, "target", "t", "", "Target API server URL")
 	proxyCmd.Flags().StringVarP(&proxyDataDir, "data-dir", "d", defaultDataDir, "Directory to store API transaction data")
+	proxyCmd.Flags().Int64Var(&proxyMaxBodyBytes, "max-body-bytes", proxy.DefaultMaxBodyBytes, "Maximum response body size (in bytes) captured per transaction; the full response is still forwarded")
 	_ = proxyCmd.MarkFlagRequired("target")
 
 	// Add generate command flags
@@ -204,7 +206,7 @@ func main() {
 	}
 }
 
-func runProxy(port int, target string, dataDir string) error {
+func runProxy(port int, target string, dataDir string, maxBodyBytes int64) error {
 	// Print a beautiful startup banner
 	logger.PrintStartupBanner(port, target, dataDir)
 
@@ -233,6 +235,7 @@ func runProxy(port int, target string, dataDir string) error {
 		logger.PrintError("Failed to create proxy server: %v", err)
 		return fmt.Errorf("failed to create proxy server: %v", err)
 	}
+	server.MaxBodyBytes = maxBodyBytes
 
 	if err := server.Start(); err != nil {
 		logger.PrintError("Proxy server error: %v", err)
@@ -314,12 +317,19 @@ func generateDocs(output string, dataDir string, title string, description strin
 		return fmt.Errorf("failed to get absolute path for output file: %v", err)
 	}
 
-	// Create storage to read API transactions
-	storage, err := proxy.NewFileStorage(dataDir)
+	// Create a read-only view to read API transactions — unlike
+	// NewFileStorage this does not create a session file in the data
+	// directory, so generate never mutates the captured data.
+	storage, err := proxy.NewFileStorageReader(dataDir)
 	if err != nil {
 		logger.PrintError("Failed to create storage: %v", err)
 		return fmt.Errorf("failed to create storage: %v", err)
 	}
+	defer func() {
+		if err := storage.Close(); err != nil {
+			logger.PrintError("Failed to close storage: %v", err)
+		}
+	}()
 
 	// Get all transactions
 	transactions, err := storage.GetAll()

@@ -43,10 +43,16 @@ type ResponseData struct {
 type APITransaction struct {
 	Request  RequestData
 	Response ResponseData
+	// ResponseTruncated is true when the captured response body was cut at
+	// the proxy's capture limit; the full response was still forwarded.
+	ResponseTruncated bool `json:"response_truncated,omitempty"`
 }
 
 // APIInterceptor is a function that processes API transactions
 type APIInterceptor func(APITransaction)
+
+// DefaultMaxBodyBytes is the default capture limit for response bodies.
+const DefaultMaxBodyBytes int64 = 10 << 20 // 10 MiB
 
 // ProxyServer is an HTTP proxy server that captures API traffic
 type ProxyServer struct {
@@ -54,6 +60,9 @@ type ProxyServer struct {
 	targetURL   *url.URL
 	proxy       *httputil.ReverseProxy
 	interceptor APIInterceptor
+	// MaxBodyBytes bounds how much of a response body is captured. The full
+	// response is still forwarded to the client. <= 0 means unlimited.
+	MaxBodyBytes int64
 }
 
 // NewProxyServer creates a new proxy server
@@ -66,10 +75,11 @@ func NewProxyServer(port int, target string, interceptor APIInterceptor) (*Proxy
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
 	return &ProxyServer{
-		port:        port,
-		targetURL:   targetURL,
-		proxy:       proxy,
-		interceptor: interceptor,
+		port:         port,
+		targetURL:    targetURL,
+		proxy:        proxy,
+		interceptor:  interceptor,
+		MaxBodyBytes: DefaultMaxBodyBytes,
 	}, nil
 }
 
@@ -86,7 +96,7 @@ func (p *ProxyServer) Start() error {
 		}
 
 		// Create a custom response writer to capture the response
-		rw := newResponseWriter(w)
+		rw := newResponseWriter(w, p.MaxBodyBytes)
 
 		// Forward the request to the target server
 		p.proxy.ServeHTTP(rw, r)
@@ -96,8 +106,9 @@ func (p *ProxyServer) Start() error {
 
 		// Create a complete transaction and pass it to the interceptor
 		transaction := APITransaction{
-			Request:  reqData,
-			Response: respData,
+			Request:           reqData,
+			Response:          respData,
+			ResponseTruncated: rw.Truncated(),
 		}
 
 		// Log the captured request to the console
@@ -166,6 +177,9 @@ func captureRequest(r *http.Request) (RequestData, error) {
 		Timestamp:   time.Now(),
 	}
 
+	// Restore the body without copying the bytes (io.ReadAll already owns them)
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
 	return reqData, nil
 }
 
@@ -174,14 +188,18 @@ type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
 	body       *bytes.Buffer
+	maxBody    int64
+	captured   int64
+	truncated  bool
 }
 
-// newResponseWriter creates a new responseWriter
-func newResponseWriter(w http.ResponseWriter) *responseWriter {
+// newResponseWriter creates a new responseWriter with the default capture limit
+func newResponseWriter(w http.ResponseWriter, maxBody int64) *responseWriter {
 	return &responseWriter{
 		ResponseWriter: w,
 		statusCode:     http.StatusOK, // Default status code
 		body:           &bytes.Buffer{},
+		maxBody:        maxBody,
 	}
 }
 
@@ -191,12 +209,29 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.ResponseWriter.WriteHeader(code)
 }
 
-// Write captures the response body
+// Write captures the response body, forwarding the full body to the client but
+// retaining at most maxBody bytes for capture.
 func (rw *responseWriter) Write(b []byte) (int, error) {
-	// Write to our buffer
-	rw.body.Write(b)
-	// Write to the original response writer
+	if rw.maxBody > 0 && rw.captured >= rw.maxBody {
+		rw.truncated = true
+	} else {
+		n := len(b)
+		if rw.maxBody > 0 {
+			if remaining := rw.maxBody - rw.captured; int64(n) > remaining {
+				n = int(remaining)
+				rw.truncated = true
+			}
+		}
+		rw.body.Write(b[:n])
+		rw.captured += int64(n)
+	}
+	// Write the full body to the original response writer
 	return rw.ResponseWriter.Write(b)
+}
+
+// Truncated reports whether the captured body was cut at the capture limit.
+func (rw *responseWriter) Truncated() bool {
+	return rw.truncated
 }
 
 // Flush implements http.Flusher for SSE/streaming support

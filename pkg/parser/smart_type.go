@@ -7,11 +7,24 @@ import (
 	"time"
 )
 
+// Compiled once; previously these were built per TypeInferrer instance.
+var typePatterns = map[string]*regexp.Regexp{
+	"uuid":     regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`),
+	"email":    regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`),
+	"uri":      regexp.MustCompile(`^(https?|ftp)://[^\s/$.?#].[^\s]*$`),
+	"date":     regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`),
+	"time":     regexp.MustCompile(`^\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:\d{2})?$`),
+	"datetime": regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:\d{2})?$`),
+	"ipv4":     regexp.MustCompile(`^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$`),
+	"ipv6":     regexp.MustCompile(`^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))$`),
+}
+
 // TypeInferrer analyzes values to determine their types more intelligently
 type TypeInferrer struct {
 	typePatterns map[string]*regexp.Regexp
 	samples      map[string][]interface{}
 	maxSamples   int
+	formatCache  map[string]string // value -> inferred format
 }
 
 // NewTypeInferrer creates a new type inference engine
@@ -21,23 +34,21 @@ func NewTypeInferrer(maxSamples int) *TypeInferrer {
 	}
 
 	t := &TypeInferrer{
-		samples:    make(map[string][]interface{}),
-		maxSamples: maxSamples,
+		samples:     make(map[string][]interface{}),
+		maxSamples:  maxSamples,
+		formatCache: make(map[string]string),
 	}
 
 	// Initialize patterns for special types
-	t.typePatterns = map[string]*regexp.Regexp{
-		"uuid":     regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`),
-		"email":    regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`),
-		"uri":      regexp.MustCompile(`^(https?|ftp)://[^\s/$.?#].[^\s]*$`),
-		"date":     regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`),
-		"time":     regexp.MustCompile(`^\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:\d{2})?$`),
-		"datetime": regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:\d{2})?$`),
-		"ipv4":     regexp.MustCompile(`^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$`),
-		"ipv6":     regexp.MustCompile(`^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))$`),
-	}
+	t.typePatterns = typePatterns
 
 	return t
+}
+
+// ResetSamples clears all collected samples
+func (t *TypeInferrer) ResetSamples() {
+	t.samples = make(map[string][]interface{})
+	t.formatCache = make(map[string]string)
 }
 
 // AddSample adds a new sample value for analysis
@@ -53,11 +64,6 @@ func (t *TypeInferrer) AddSample(path string, value interface{}) {
 	}
 
 	t.samples[path] = append(t.samples[path], value)
-}
-
-// ResetSamples clears all collected samples
-func (t *TypeInferrer) ResetSamples() {
-	t.samples = make(map[string][]interface{})
 }
 
 // InferSchema generates a refined schema based on collected samples
@@ -165,8 +171,20 @@ func (t *TypeInferrer) inferType(value interface{}) *Schema {
 	return schema
 }
 
-// inferStringFormat tries to determine if a string matches a known format
+// inferStringFormat tries to determine if a string matches a known format.
+// Results are memoized per value so repeated occurrences of the same string
+// do not re-run the pattern matches.
 func (t *TypeInferrer) inferStringFormat(value string) string {
+	if format, ok := t.formatCache[value]; ok {
+		return format
+	}
+
+	format := t.inferStringFormatUncached(value)
+	t.formatCache[value] = format
+	return format
+}
+
+func (t *TypeInferrer) inferStringFormatUncached(value string) string {
 	// Try all patterns
 	for format, pattern := range t.typePatterns {
 		if pattern.MatchString(value) {

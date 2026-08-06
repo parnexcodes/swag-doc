@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -23,9 +24,10 @@ type OpenAPISpec = openapi3.T
 
 // OpenAPIGenerator generates OpenAPI specs from API transactions
 type OpenAPIGenerator struct {
-	config       OpenAPIConfig
-	transactions []proxy.APITransaction
-	schemas      map[string]*openapi3.Schema
+	config        OpenAPIConfig
+	transactions  []proxy.APITransaction
+	schemas       map[string]*openapi3.Schema
+	sanitizeCache map[string]interface{} // body content -> sanitized object
 }
 
 // OpenAPIConfig holds configuration for the generator
@@ -57,9 +59,10 @@ func NewOpenAPIGenerator(config OpenAPIConfig) *OpenAPIGenerator {
 	}
 
 	return &OpenAPIGenerator{
-		config:       config,
-		transactions: []proxy.APITransaction{},
-		schemas:      make(map[string]*openapi3.Schema),
+		config:        config,
+		transactions:  []proxy.APITransaction{},
+		schemas:       make(map[string]*openapi3.Schema),
+		sanitizeCache: make(map[string]interface{}),
 	}
 }
 
@@ -132,24 +135,24 @@ func maybeDecodeBase64(data []byte) []byte {
 	return data
 }
 
-// sanitizeBodyForSchema sanitizes a raw JSON body into type placeholders for schema inference.
-// This replaces actual values with type markers while preserving structure.
-func sanitizeBodyForSchema(data []byte) []byte {
+// sanitizeBody parses a raw JSON body into type placeholders for schema
+// inference, caching the result per unique body content so each distinct
+// body is processed at most once per generation run.
+func (g *OpenAPIGenerator) sanitizeBody(data []byte) (interface{}, bool) {
 	if len(data) == 0 {
-		return nil
+		return nil, false
 	}
-
+	key := string(data)
+	if obj, ok := g.sanitizeCache[key]; ok {
+		return obj, true
+	}
 	var obj interface{}
 	if err := json.Unmarshal(data, &obj); err != nil {
-		return nil
+		return nil, false
 	}
-
 	sanitized := sanitizeValueForSchema(obj)
-	result, err := json.Marshal(sanitized)
-	if err != nil {
-		return nil
-	}
-	return result
+	g.sanitizeCache[key] = sanitized
+	return sanitized, true
 }
 
 // sanitizeValueForSchema replaces actual values with type placeholders
@@ -273,31 +276,21 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 
 		// Collect samples for type inference using sanitized data
 		if tx.Request.Body != nil {
-			sanitized := sanitizeBodyForSchema(tx.Request.Body)
-			if sanitized != nil {
-				bodyObj := make(map[string]interface{})
-				if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
+			if obj, ok := g.sanitizeBody(tx.Request.Body); ok {
+				if bodyObj, ok := obj.(map[string]interface{}); ok {
 					typeInferrer.AddSample("request:"+tx.Request.Method+":"+tx.Request.Path, bodyObj)
 				}
 			}
 		}
 
 		if tx.Response.Body != nil {
-			sanitized := sanitizeBodyForSchema(tx.Response.Body)
-			if sanitized != nil {
-				// Try as object first
-				bodyObj := make(map[string]interface{})
-				if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
-					typeInferrer.AddSample("response:"+tx.Request.Method+":"+tx.Request.Path, bodyObj)
-				} else {
-					// Try as array
-					var bodyArr []interface{}
-					if err := json.Unmarshal(sanitized, &bodyArr); err == nil {
-						if len(bodyArr) > 0 {
-							for _, item := range bodyArr {
-								typeInferrer.AddSample("response:"+tx.Request.Method+":"+tx.Request.Path+":item", item)
-							}
-						}
+			if obj, ok := g.sanitizeBody(tx.Response.Body); ok {
+				switch body := obj.(type) {
+				case map[string]interface{}:
+					typeInferrer.AddSample("response:"+tx.Request.Method+":"+tx.Request.Path, body)
+				case []interface{}:
+					for _, item := range body {
+						typeInferrer.AddSample("response:"+tx.Request.Method+":"+tx.Request.Path+":item", item)
 					}
 				}
 			}
@@ -329,10 +322,8 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 		if endpoints[templatedPath][tx.Request.Method][tx.Response.StatusCode] {
 			// Add to schema merger for later merging using sanitized data
 			if tx.Request.Body != nil {
-				sanitized := sanitizeBodyForSchema(tx.Request.Body)
-				if sanitized != nil {
-					bodyObj := make(map[string]interface{})
-					if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
+				if obj, ok := g.sanitizeBody(tx.Request.Body); ok {
+					if bodyObj, ok := obj.(map[string]interface{}); ok {
 						if requestSchema, err := g.parseJSONBody(bodyObj); err == nil && requestSchema != nil {
 							schemaMerger.AddSchema(templatedPath, tx.Request.Method, *requestSchema)
 						}
@@ -341,10 +332,8 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 			}
 
 			if tx.Response.Body != nil {
-				sanitized := sanitizeBodyForSchema(tx.Response.Body)
-				if sanitized != nil {
-					bodyObj := make(map[string]interface{})
-					if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
+				if obj, ok := g.sanitizeBody(tx.Response.Body); ok {
+					if bodyObj, ok := obj.(map[string]interface{}); ok {
 						if responseSchema, err := g.parseJSONBody(bodyObj); err == nil && responseSchema != nil {
 							schemaMerger.AddSchema(templatedPath+":response", tx.Request.Method, *responseSchema)
 						}
@@ -471,15 +460,10 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 
 		// Parse request body
 		var requestSchema *parser.Schema
-		var rawRequestBody map[string]interface{}
 		if tx.Request.Body != nil {
-			if err := json.Unmarshal(tx.Request.Body, &rawRequestBody); err == nil {
-				sanitized := sanitizeBodyForSchema(tx.Request.Body)
-				if sanitized != nil {
-					bodyObj := make(map[string]interface{})
-					if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
-						requestSchema, _ = g.parseJSONBody(bodyObj)
-					}
+			if obj, ok := g.sanitizeBody(tx.Request.Body); ok {
+				if bodyObj, ok := obj.(map[string]interface{}); ok {
+					requestSchema, _ = g.parseJSONBody(bodyObj)
 				}
 			}
 		}
@@ -491,11 +475,9 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 			}
 
 			// Apply type inference using sanitized data
-			sanitized := sanitizeBodyForSchema(tx.Request.Body)
 			samples := []interface{}{}
-			if sanitized != nil {
-				bodyObj := make(map[string]interface{})
-				if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
+			if obj, ok := g.sanitizeBody(tx.Request.Body); ok {
+				if bodyObj, ok := obj.(map[string]interface{}); ok {
 					samples = append(samples, bodyObj)
 				}
 			}
@@ -527,35 +509,29 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 			decodedBody := maybeDecodeBase64(tx.Response.Body)
 
 			// Sanitize for schema inference
-			sanitized := sanitizeBodyForSchema(decodedBody)
-			if sanitized != nil {
-				// Try as object first
-				bodyObj := make(map[string]interface{})
-				if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
-					responseSchema, _ = g.parseJSONBody(bodyObj)
+			if obj, ok := g.sanitizeBody(decodedBody); ok {
+				switch body := obj.(type) {
+				case map[string]interface{}:
+					responseSchema, _ = g.parseJSONBody(body)
 					// Store raw for example
 					_ = json.Unmarshal(decodedBody, &rawResponseBody)
-				} else {
-					// Try as array
-					var bodyArr []interface{}
-					if err := json.Unmarshal(sanitized, &bodyArr); err == nil {
-						if len(bodyArr) > 0 {
-							itemSchema, _ := g.parseJSONBody(bodyArr[0])
-							if itemSchema != nil {
-								responseSchema = &parser.Schema{
-									Type:  "array",
-									Items: itemSchema,
-								}
-								// Store raw array for example
-								var rawArr []interface{}
-								_ = json.Unmarshal(decodedBody, &rawArr)
-								rawResponseBody = rawArr
-							}
-						} else {
+				case []interface{}:
+					if len(body) > 0 {
+						itemSchema, _ := g.parseJSONBody(body[0])
+						if itemSchema != nil {
 							responseSchema = &parser.Schema{
 								Type:  "array",
-								Items: &parser.Schema{Type: "string"},
+								Items: itemSchema,
 							}
+							// Store raw array for example
+							var rawArr []interface{}
+							_ = json.Unmarshal(decodedBody, &rawArr)
+							rawResponseBody = rawArr
+						}
+					} else {
+						responseSchema = &parser.Schema{
+							Type:  "array",
+							Items: &parser.Schema{Type: "string"},
 						}
 					}
 				}
@@ -571,18 +547,14 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 
 			// Apply type inference using sanitized data
 			samples := []interface{}{}
-			sanitized := sanitizeBodyForSchema(tx.Response.Body)
-			if sanitized != nil {
-				bodyObj := make(map[string]interface{})
-				if err := json.Unmarshal(sanitized, &bodyObj); err == nil {
-					samples = append(samples, bodyObj)
-				} else {
-					var bodyArr []interface{}
-					if err := json.Unmarshal(sanitized, &bodyArr); err == nil {
-						if responseSchema.Type == "array" && responseSchema.Items != nil {
-							// Use raw body for examples
-							responseSchema.Example = rawResponseBody
-						}
+			if obj, ok := g.sanitizeBody(tx.Response.Body); ok {
+				switch body := obj.(type) {
+				case map[string]interface{}:
+					samples = append(samples, body)
+				case []interface{}:
+					if responseSchema.Type == "array" && responseSchema.Items != nil {
+						// Use raw body for examples
+						responseSchema.Example = rawResponseBody
 					}
 				}
 			}
@@ -741,7 +713,7 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 		}
 	}
 
-	// Generate tags for the document
+	// Create tag objects for the specification
 	tagSet := make(map[string]bool)
 
 	// Collect all unique tags from operations
@@ -759,8 +731,15 @@ func (g *OpenAPIGenerator) generateAPI() (*OpenAPISpec, error) {
 		}
 	}
 
-	// Create tag objects for the specification
+	// Sort tags for deterministic output (map iteration order is random)
+	tags := make([]string, 0, len(tagSet))
 	for tag := range tagSet {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+
+	// Create tag objects for the specification
+	for _, tag := range tags {
 		doc.Tags = append(doc.Tags, &openapi3.Tag{
 			Name:        tag,
 			Description: fmt.Sprintf("Operations related to %s", tag),

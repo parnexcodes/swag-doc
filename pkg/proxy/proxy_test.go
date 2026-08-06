@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -60,7 +61,7 @@ func TestProxyServer(t *testing.T) {
 		}
 
 		// Create a custom response writer to capture the response
-		rw := newResponseWriter(w)
+		rw := newResponseWriter(w, DefaultMaxBodyBytes)
 
 		// Make a request to the API server
 		client := &http.Client{}
@@ -256,7 +257,109 @@ func TestFileStorageClear(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, all)
 
+	// Store after Clear must fail cleanly (session file is gone)
+	assert.Error(t, storage.Store(tx))
+
 	_ = storage.Close()
+}
+
+func TestFileStorageCloseFlushesToDisk(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	storage, err := NewFileStorage(tmpDir)
+	require.NoError(t, err)
+
+	for i := 0; i < 3; i++ {
+		tx := APITransaction{
+			Request:  RequestData{Method: "GET", Path: "/flush"},
+			Response: ResponseData{StatusCode: 200, Body: []byte(`{"n":` + strconv.Itoa(i) + `}`)},
+		}
+		require.NoError(t, storage.Store(tx))
+	}
+
+	// Close performs the final sync and finalizes the file
+	require.NoError(t, storage.Close())
+
+	// A second Close is a no-op
+	require.NoError(t, storage.Close())
+
+	files, err := os.ReadDir(tmpDir)
+	require.NoError(t, err)
+	var sessionFile string
+	for _, f := range files {
+		if !f.IsDir() && filepath.Ext(f.Name()) == ".json" {
+			sessionFile = filepath.Join(tmpDir, f.Name())
+		}
+	}
+	require.NotEmpty(t, sessionFile)
+
+	data, err := os.ReadFile(sessionFile)
+	require.NoError(t, err)
+	var transactions []APITransaction
+	require.NoError(t, json.Unmarshal(data, &transactions))
+	assert.Len(t, transactions, 3)
+}
+
+func TestFileStorageFlushIntervalDisabled(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// A zero interval disables the periodic flusher but Close still syncs
+	storage, err := NewFileStorageWithFlushInterval(tmpDir, 0)
+	require.NoError(t, err)
+
+	tx := APITransaction{
+		Request:  RequestData{Method: "GET", Path: "/no-flusher"},
+		Response: ResponseData{StatusCode: 200, Body: []byte(`{}`)},
+	}
+	require.NoError(t, storage.Store(tx))
+	require.NoError(t, storage.Close())
+
+	data, err := os.ReadFile(storage.sessionFile)
+	require.NoError(t, err)
+	var transactions []APITransaction
+	require.NoError(t, json.Unmarshal(data, &transactions))
+	assert.Len(t, transactions, 1)
+}
+
+func TestFileStorageConcurrentWritesNotInterleaved(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	storage, err := NewFileStorageWithFlushInterval(tmpDir, 0)
+	require.NoError(t, err)
+
+	const total = 500
+	var wg sync.WaitGroup
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			tx := APITransaction{
+				Request:  RequestData{Method: "GET", Path: "/items"},
+				Response: ResponseData{StatusCode: 200, Body: []byte(`{"id":` + strconv.Itoa(id) + `}`)},
+			}
+			if err := storage.Store(tx); err != nil {
+				t.Errorf("Store error: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	require.NoError(t, storage.Close())
+
+	// The session file must parse as one valid array containing every
+	// transaction exactly once — any interleaved or partial write would
+	// make the file invalid JSON or drop entries.
+	data, err := os.ReadFile(storage.sessionFile)
+	require.NoError(t, err)
+	var transactions []APITransaction
+	require.NoError(t, json.Unmarshal(data, &transactions))
+	assert.Len(t, transactions, total)
+
+	seen := make(map[string]bool)
+	for _, tx := range transactions {
+		key := string(tx.Response.Body)
+		require.False(t, seen[key], "duplicate transaction body %s", key)
+		seen[key] = true
+	}
 }
 
 func TestSanitizeHeaders(t *testing.T) {
@@ -334,4 +437,196 @@ func TestSanitizeJSON(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResponseWriterTruncatesAtLimit(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := newResponseWriter(rec, 10)
+
+	body := []byte("0123456789ABCDEF")
+	n, err := rw.Write(body)
+	require.NoError(t, err)
+	assert.Equal(t, len(body), n)
+
+	// The full body is forwarded to the client
+	assert.Equal(t, string(body), rec.Body.String())
+	// Only the first 10 bytes are captured
+	assert.Equal(t, "0123456789", rw.body.String())
+	assert.True(t, rw.Truncated())
+
+	// Further writes do not grow the captured body
+	_, _ = rw.Write([]byte("GH"))
+	assert.Equal(t, "0123456789", rw.body.String())
+	assert.True(t, rw.Truncated())
+
+	// Split writes: the marker is set as soon as the limit is crossed
+	rec2 := httptest.NewRecorder()
+	rw2 := newResponseWriter(rec2, 10)
+	_, _ = rw2.Write([]byte("0123456789")) // exactly at the limit
+	assert.False(t, rw2.Truncated())
+	_, _ = rw2.Write([]byte("X"))
+	assert.True(t, rw2.Truncated())
+	assert.Equal(t, "0123456789", rw2.body.String())
+}
+
+func TestResponseWriterNoTruncation(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := newResponseWriter(rec, 100)
+	_, _ = rw.Write([]byte("short"))
+	assert.Equal(t, "short", rw.body.String())
+	assert.False(t, rw.Truncated())
+}
+
+func TestResponseWriterUnlimited(t *testing.T) {
+	rw := newResponseWriter(httptest.NewRecorder(), 0)
+	_, _ = rw.Write([]byte("anything at all"))
+	assert.Equal(t, "anything at all", rw.body.String())
+	assert.False(t, rw.Truncated())
+}
+
+func TestCapturedTransactionTruncationMarker(t *testing.T) {
+	// Exercise the capture path exactly as the proxy handler does.
+	reqData, err := captureRequest(httptest.NewRequest("GET", "/big", nil))
+	require.NoError(t, err)
+
+	rw := newResponseWriter(httptest.NewRecorder(), 4)
+	_, _ = rw.Write([]byte(`{"data":"very large payload"}`))
+
+	respData := captureResponse(rw)
+	tx := APITransaction{
+		Request:           reqData,
+		Response:          respData,
+		ResponseTruncated: rw.Truncated(),
+	}
+
+	assert.True(t, tx.ResponseTruncated)
+	assert.Equal(t, `{"da`, string(tx.Response.Body))
+
+	// The marker survives JSON round-tripping (session file storage)
+	data, err := json.Marshal(tx)
+	require.NoError(t, err)
+	var decoded APITransaction
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.True(t, decoded.ResponseTruncated)
+
+	// Untruncated transactions omit the field entirely
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &raw))
+	assert.Contains(t, raw, "response_truncated")
+
+	tx2 := APITransaction{Request: reqData, Response: respData}
+	data2, err := json.Marshal(tx2)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data2), "response_truncated")
+}
+
+func TestFileStorageReaderNoSideEffects(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Prepare a data directory with a session file
+	writer, err := NewFileStorage(tmpDir)
+	require.NoError(t, err)
+	tx := APITransaction{
+		Request:  RequestData{Method: "GET", Path: "/read"},
+		Response: ResponseData{StatusCode: 200, Body: []byte(`{"ok":true}`)},
+	}
+	require.NoError(t, writer.Store(tx))
+	require.NoError(t, writer.Close())
+
+	before, err := os.ReadDir(tmpDir)
+	require.NoError(t, err)
+
+	// The reader must not create any file
+	reader, err := NewFileStorageReader(tmpDir)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, reader.Close()) }()
+
+	after, err := os.ReadDir(tmpDir)
+	require.NoError(t, err)
+	assert.Equal(t, len(before), len(after), "reader created or removed files")
+
+	// And it still reads the captured transactions
+	all, err := reader.GetAll()
+	require.NoError(t, err)
+	assert.Len(t, all, 1)
+	assert.Equal(t, "/read", all[0].Request.Path)
+
+	// File contents are byte-for-byte unchanged
+	for i, entry := range before {
+		b1, err := os.ReadFile(filepath.Join(tmpDir, entry.Name()))
+		require.NoError(t, err)
+		b2, err := os.ReadFile(filepath.Join(tmpDir, after[i].Name()))
+		require.NoError(t, err)
+		assert.Equal(t, b1, b2)
+	}
+}
+
+func TestFileStorageReaderIsReadOnly(t *testing.T) {
+	tmpDir := t.TempDir()
+	reader, err := NewFileStorageReader(tmpDir)
+	require.NoError(t, err)
+
+	tx := APITransaction{
+		Request:  RequestData{Method: "GET", Path: "/x"},
+		Response: ResponseData{StatusCode: 200},
+	}
+	assert.Error(t, reader.Store(tx))
+	assert.Error(t, reader.Clear())
+	// Close on a reader is a no-op
+	assert.NoError(t, reader.Close())
+
+	// No session file was ever created
+	files, err := os.ReadDir(tmpDir)
+	require.NoError(t, err)
+	assert.Empty(t, files)
+}
+
+func TestFileStorageGetAllMultipleFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	writer, err := NewFileStorage(tmpDir)
+	require.NoError(t, err)
+	for i := 0; i < 3; i++ {
+		tx := APITransaction{
+			Request:  RequestData{Method: "GET", Path: "/first"},
+			Response: ResponseData{StatusCode: 200},
+		}
+		require.NoError(t, writer.Store(tx))
+	}
+	require.NoError(t, writer.Close())
+
+	// A second session file from a separate writer process
+	writer2, err := NewFileStorage(tmpDir)
+	require.NoError(t, err)
+	tx := APITransaction{
+		Request:  RequestData{Method: "POST", Path: "/second"},
+		Response: ResponseData{StatusCode: 201},
+	}
+	require.NoError(t, writer2.Store(tx))
+	require.NoError(t, writer2.Close())
+
+	// A legacy single-transaction file must still be readable
+	legacy := APITransaction{
+		Request:  RequestData{Method: "PUT", Path: "/legacy"},
+		Response: ResponseData{StatusCode: 200},
+	}
+	legacyData, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "legacy.json"), legacyData, 0o644))
+
+	reader, err := NewFileStorageReader(tmpDir)
+	require.NoError(t, err)
+	defer func() { _ = reader.Close() }()
+
+	all, err := reader.GetAll()
+	require.NoError(t, err)
+	assert.Len(t, all, 5)
+
+	paths := map[string]int{}
+	for _, tx := range all {
+		paths[tx.Request.Path]++
+	}
+	assert.Equal(t, 3, paths["/first"])
+	assert.Equal(t, 1, paths["/second"])
+	assert.Equal(t, 1, paths["/legacy"])
 }

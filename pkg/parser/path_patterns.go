@@ -7,6 +7,15 @@ import (
 	"strings"
 )
 
+// Compiled once; previously these were recompiled inside hot functions
+// (per path, per segment, per transaction).
+var (
+	uuidSegmentPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
+	dateSegmentPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	slugSegmentPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	paramNamePattern   = regexp.MustCompile(`{([^}]+)}`)
+)
+
 // PathPatternDetector detects path patterns from observed URLs
 type PathPatternDetector struct {
 	pathObservations map[string][]string // base path -> observed paths
@@ -88,8 +97,7 @@ func (d *PathPatternDetector) templatizeSinglePath(path string) {
 		}
 
 		// UUID detection
-		uuidPattern := regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
-		if uuidPattern.MatchString(segment) {
+		if uuidSegmentPattern.MatchString(segment) {
 			segments[i] = "{uuid}"
 			modified = true
 			continue
@@ -153,34 +161,51 @@ func (d *PathPatternDetector) detectPatternInGroup(paths []string) {
 
 // detectCommonRESTPatterns detects common REST patterns
 func (d *PathPatternDetector) detectCommonRESTPatterns(basePath string, paths []string) {
-	// Detect paths like /users/123, /products/456, etc.
-	reIDPath := regexp.MustCompile(`^/` + basePath + `/(\d+)(/.*)?$`)
+	// Detect paths like /users/123, /products/456, etc. — string prefix
+	// parsing instead of per-call regex compilation (same semantics).
+	prefix := "/" + basePath + "/"
 
 	for _, path := range paths {
-		matches := reIDPath.FindStringSubmatch(path)
-		if len(matches) > 1 {
-			// Found an ID pattern
-			pattern := fmt.Sprintf("/%s/{id}", basePath)
-			d.patterns[pattern] = "Resource ID"
+		if !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(path, prefix)
+		idPart := rest
+		if slash := strings.IndexByte(rest, '/'); slash != -1 {
+			idPart = rest[:slash]
+		}
+		if idPart == "" {
+			continue
+		}
+
+		// Found an ID pattern
+		if _, err := strconv.Atoi(idPart); err == nil {
+			d.patterns[fmt.Sprintf("/%s/{id}", basePath)] = "Resource ID"
 
 			// If there's more after the ID, process it recursively
-			if len(matches) > 2 && matches[2] != "" {
-				subPath := matches[2]
-				if len(subPath) > 0 {
-					// Process sub-resources e.g., /users/{id}/posts
-					d.AddPath(fmt.Sprintf("/%s/id%s", basePath, subPath))
-				}
+			if len(rest) > len(idPart) {
+				// Process sub-resources e.g., /users/{id}/posts
+				d.AddPath(fmt.Sprintf("/%s/id%s", basePath, rest[len(idPart):]))
 			}
 		}
 	}
 
 	// Look for UUID patterns
-	reUUID := regexp.MustCompile(`^/` + basePath + `/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})(/.*)?$`)
 	for _, path := range paths {
-		matches := reUUID.FindStringSubmatch(path)
-		if len(matches) > 1 {
-			pattern := fmt.Sprintf("/%s/{uuid}", basePath)
-			d.patterns[pattern] = "Resource UUID"
+		if !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(path, prefix)
+		idPart := rest
+		if slash := strings.IndexByte(rest, '/'); slash != -1 {
+			idPart = rest[:slash]
+		}
+		if idPart == "" {
+			continue
+		}
+
+		if uuidSegmentPattern.MatchString(idPart) {
+			d.patterns[fmt.Sprintf("/%s/{uuid}", basePath)] = "Resource UUID"
 		}
 	}
 }
@@ -212,10 +237,9 @@ func (d *PathPatternDetector) inferParameterType(values []string) (string, strin
 	}
 
 	// Check for UUIDs
-	uuidPattern := regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 	allUUIDs := true
 	for v := range uniqueValues {
-		if !uuidPattern.MatchString(v) {
+		if !uuidSegmentPattern.MatchString(v) {
 			allUUIDs = false
 			break
 		}
@@ -226,10 +250,9 @@ func (d *PathPatternDetector) inferParameterType(values []string) (string, strin
 	}
 
 	// Check for dates
-	datePattern := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 	allDates := true
 	for v := range uniqueValues {
-		if !datePattern.MatchString(v) {
+		if !dateSegmentPattern.MatchString(v) {
 			allDates = false
 			break
 		}
@@ -240,10 +263,9 @@ func (d *PathPatternDetector) inferParameterType(values []string) (string, strin
 	}
 
 	// Check for slugs
-	slugPattern := regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 	allSlugs := true
 	for v := range uniqueValues {
-		if !slugPattern.MatchString(v) {
+		if !slugSegmentPattern.MatchString(v) {
 			allSlugs = false
 			break
 		}
@@ -288,8 +310,7 @@ func (d *PathPatternDetector) TemplatizePath(path string) string {
 		}
 
 		// Check for UUIDs
-		uuidPattern := regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
-		if uuidPattern.MatchString(segment) {
+		if uuidSegmentPattern.MatchString(segment) {
 			segments[i] = "{uuid}"
 			modified = true
 			continue
@@ -315,8 +336,7 @@ func GetPathParameters(path, template string) map[string]string {
 	params := make(map[string]string)
 
 	// Extract parameter names from the template
-	paramPattern := regexp.MustCompile(`{([^}]+)}`)
-	matches := paramPattern.FindAllStringSubmatch(template, -1)
+	matches := paramNamePattern.FindAllStringSubmatch(template, -1)
 
 	if len(matches) == 0 {
 		return params
@@ -332,7 +352,7 @@ func GetPathParameters(path, template string) map[string]string {
 			break
 		}
 
-		match := paramPattern.FindStringSubmatch(segment)
+		match := paramNamePattern.FindStringSubmatch(segment)
 		if len(match) > 1 {
 			paramName := match[1]
 			paramValue := pathSegments[i]

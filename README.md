@@ -65,6 +65,7 @@ swagdoc generate --output swagger.json
 | `--port` | Port to run the proxy server on | `8080` |
 | `--target` | Target API server URL (required) | |
 | `--data-dir` | Directory to store API transaction data | `./swagdoc-data` |
+| `--max-body-bytes` | Maximum response body size (in bytes) captured per transaction; the full response is still forwarded to the client | `10485760` (10 MiB) |
 
 #### Generate Command
 
@@ -109,7 +110,7 @@ swagdoc generate \
 ## How It Works
 
 1. **Capture**: SwagDoc acts as a reverse proxy, intercepting all HTTP requests and responses.
-2. **Store**: Raw transaction data is stored on disk. Sensitive headers and query parameters are redacted.
+2. **Store**: Raw transaction data is stored on disk. Sensitive headers and query parameters are redacted. Response bodies larger than `--max-body-bytes` are truncated for capture (the client still receives the full response), and transactions are flushed to disk periodically rather than on every request.
 3. **Analyze**: Path patterns, authentication schemes, and data types are detected from the captured traffic.
 4. **Generate**: An OpenAPI 3.0 specification is generated from the analyzed data, with schema merging across multiple observations.
 

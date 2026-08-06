@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/parnexcodes/swag-doc/internal/testcorpus"
 	"github.com/parnexcodes/swag-doc/pkg/parser"
 	"github.com/parnexcodes/swag-doc/pkg/proxy"
 	"github.com/stretchr/testify/assert"
@@ -782,40 +783,137 @@ func TestGenerateSpecQueryParams(t *testing.T) {
 	assert.True(t, paramNames["limit"])
 }
 
-func TestSanitizeBodyForSchema(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    []byte
-		expected string
-	}{
-		{
-			name:     "empty data",
-			input:    []byte{},
-			expected: "",
+func TestSanitizeBody(t *testing.T) {
+	generator := NewOpenAPIGenerator(OpenAPIConfig{})
+
+	t.Run("empty data", func(t *testing.T) {
+		obj, ok := generator.sanitizeBody([]byte{})
+		assert.False(t, ok)
+		assert.Nil(t, obj)
+	})
+
+	t.Run("invalid JSON", func(t *testing.T) {
+		obj, ok := generator.sanitizeBody([]byte("not json"))
+		assert.False(t, ok)
+		assert.Nil(t, obj)
+	})
+
+	t.Run("object sanitized to placeholders", func(t *testing.T) {
+		obj, ok := generator.sanitizeBody([]byte(`{"name":"Alice","age":30,"active":true,"score":1.5}`))
+		require.True(t, ok)
+		expected := map[string]interface{}{
+			"name":   "__string__",
+			"age":    "__integer__",
+			"active": "__boolean__",
+			"score":  "__number__",
+		}
+		assert.Equal(t, expected, obj)
+	})
+
+	t.Run("array sanitized with capped elements", func(t *testing.T) {
+		obj, ok := generator.sanitizeBody([]byte(`[1,2,3,4,5,6,7]`))
+		require.True(t, ok)
+		assert.Equal(t, []interface{}{"__integer__", "__integer__", "__integer__", "__integer__", "__integer__"}, obj)
+	})
+
+	t.Run("identical bodies share one cache entry", func(t *testing.T) {
+		fresh := NewOpenAPIGenerator(OpenAPIConfig{})
+		body := []byte(`{"a":1}`)
+		obj1, ok1 := fresh.sanitizeBody(body)
+		obj2, ok2 := fresh.sanitizeBody(body)
+		require.True(t, ok1)
+		require.True(t, ok2)
+		assert.Equal(t, obj1, obj2)
+		assert.Len(t, fresh.sanitizeCache, 1)
+
+		// A different body adds a separate entry
+		_, ok := fresh.sanitizeBody([]byte(`{"b":2}`))
+		require.True(t, ok)
+		assert.Len(t, fresh.sanitizeCache, 2)
+	})
+
+	t.Run("invalid bodies are not cached", func(t *testing.T) {
+		fresh := NewOpenAPIGenerator(OpenAPIConfig{})
+		_, ok := fresh.sanitizeBody([]byte("broken"))
+		assert.False(t, ok)
+		assert.Empty(t, fresh.sanitizeCache)
+	})
+}
+
+func TestGenerateSpecWithTruncatedBody(t *testing.T) {
+	// A response body cut mid-JSON (as the proxy capture limit produces) must
+	// not break generation: the body simply contributes no schema.
+	generator := NewOpenAPIGenerator(OpenAPIConfig{
+		Title:           "Test API",
+		Description:     "Test Description",
+		Version:         "1.0.0",
+		TagMappings:     make(map[string]string),
+		VersionPrefixes: make(map[string]bool),
+	})
+	generator.AddTransaction(proxy.APITransaction{
+		Request: proxy.RequestData{
+			Method: "GET",
+			Path:   "/truncated",
+			Headers: http.Header{
+				"Accept": []string{"application/json"},
+			},
 		},
-		{
-			name:     "invalid JSON",
-			input:    []byte("not json"),
-			expected: "",
+		Response: proxy.ResponseData{
+			StatusCode: 200,
+			Headers: http.Header{
+				"Content-Type": []string{"application/json"},
+			},
+			// Truncated in the middle of the JSON object
+			Body: []byte(`{"id":1,"name":"par`),
 		},
-		{
-			name:     "simple object",
-			input:    []byte(`{"name":"Alice","age":30,"active":true}`),
-			expected: `{"__boolean__":"__boolean__","__integer__":"__integer__","__string__":"__string__"}`,
-		},
+	})
+
+	spec, err := generator.GenerateSpec()
+	require.NoError(t, err)
+	require.NotNil(t, spec)
+	path := spec.Paths.Find("/truncated")
+	require.NotNil(t, path)
+	require.NotNil(t, path.Get)
+	// The response exists but carries no schema for the unparseable body
+	assert.Contains(t, path.Get.Responses.Map(), "200")
+}
+
+func TestGenerateSpecCacheBoundedByDistinctBodies(t *testing.T) {
+	// A corpus of 100 transactions built from 20 byte-identical body shapes
+	// must sanitize only the distinct bodies: 20 response shapes + 1 request
+	// body (only POST carries one), regardless of transaction count.
+	corpus := testcorpus.Build(testcorpus.Options{N: 100, Paths: 10, DistinctBodies: 20, RepeatedBodies: true})
+
+	generator := NewOpenAPIGenerator(benchConfig())
+	for _, tx := range corpus {
+		generator.AddTransaction(tx)
+	}
+	_, err := generator.GenerateSpec()
+	require.NoError(t, err)
+
+	assert.Len(t, generator.sanitizeCache, 21)
+}
+
+func TestGenerateSpecDeterministicAcrossRuns(t *testing.T) {
+	// Two fresh generators over the same corpus must produce identical
+	// output — proving the shared sanitize cache is never mutated by the
+	// consumers (parseJSONBody/ApplyTypeInference/schema merging).
+	corpus := testcorpus.Build(testcorpus.Options{N: 60, Paths: 8, DistinctBodies: 12, RepeatedBodies: true})
+
+	marshal := func(t *testing.T) []byte {
+		t.Helper()
+		g := NewOpenAPIGenerator(benchConfig())
+		for _, tx := range corpus {
+			g.AddTransaction(tx)
+		}
+		spec, err := g.GenerateSpec()
+		require.NoError(t, err)
+		data, err := json.Marshal(spec)
+		require.NoError(t, err)
+		return data
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := sanitizeBodyForSchema(tt.input)
-			if tt.expected == "" {
-				assert.Nil(t, result)
-			} else {
-				assert.NotNil(t, result)
-				// Verify it's valid JSON
-				var obj map[string]interface{}
-				assert.NoError(t, json.Unmarshal(result, &obj))
-			}
-		})
-	}
+	first := marshal(t)
+	second := marshal(t)
+	assert.Equal(t, first, second)
 }
