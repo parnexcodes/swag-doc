@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -63,6 +64,26 @@ type ProxyServer struct {
 	// MaxBodyBytes bounds how much of a response body is captured. The full
 	// response is still forwarded to the client. <= 0 means unlimited.
 	MaxBodyBytes int64
+	// WSInterceptor receives captured WebSocket sessions when connections
+	// close. Nil means WebSocket sessions are not stored.
+	WSInterceptor WebSocketInterceptor
+	// MaxWSMessageBytes bounds how much of a WebSocket message payload is
+	// captured per message. The full payload is still forwarded. <= 0 means
+	// unlimited.
+	MaxWSMessageBytes int64
+	// MaxWSMessages bounds how many WebSocket messages are captured per
+	// connection; forwarding continues unchanged after the limit. <= 0 means
+	// unlimited.
+	MaxWSMessages int
+
+	// wsTransport forwards upgrade requests to the target and returns the
+	// raw connection for the 101 response.
+	wsTransport *http.Transport
+	// wsMu guards wsConns; wsWG tracks in-flight WebSocket sessions so
+	// graceful shutdown can close them and wait for their session records.
+	wsMu    sync.Mutex
+	wsConns map[*wsConnection]struct{}
+	wsWG    sync.WaitGroup
 }
 
 // NewProxyServer creates a new proxy server
@@ -80,13 +101,69 @@ func NewProxyServer(port int, target string, interceptor APIInterceptor) (*Proxy
 		proxy:        proxy,
 		interceptor:  interceptor,
 		MaxBodyBytes: DefaultMaxBodyBytes,
+		// Defaults mirror the storage layer's capture limits.
+		MaxWSMessageBytes: DefaultMaxWSMessageBytes,
+		MaxWSMessages:     DefaultMaxWSMessages,
+		wsTransport:       http.DefaultTransport.(*http.Transport).Clone(),
+		wsConns:           make(map[*wsConnection]struct{}),
 	}, nil
 }
 
 // Start starts the proxy server with graceful shutdown support
 func (p *ProxyServer) Start() error {
-	// Create a custom handler that wraps the proxy
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	addr := fmt.Sprintf(":%d", p.port)
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: p.handler(),
+	}
+
+	// Channel to receive errors from the server
+	errChan := make(chan error, 1)
+
+	// Start server in a goroutine
+	go func() {
+		log.Printf("Starting proxy server on %s", addr)
+		errChan <- srv.ListenAndServe()
+	}()
+
+	// Listen for interrupt signals for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	shutdown := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		// Shutdown does not track hijacked connections; close them so their
+		// sessions are stored before the storage final flush.
+		p.closeAllWSConnections()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("Server shutdown error: %v", err)
+		}
+		// Wait for in-flight WebSocket sessions to be recorded.
+		p.wsWG.Wait()
+	}
+
+	select {
+	case err := <-errChan:
+		shutdown()
+		return err
+	case sig := <-sigChan:
+		log.Printf("Received signal %v, shutting down gracefully...", sig)
+		shutdown()
+		return nil
+	}
+}
+
+// handler returns the HTTP handler that captures API transactions and
+// WebSocket sessions. WebSocket upgrades are routed to the dedicated capture
+// path: the ReverseProxy would hijack the connection without recording it.
+func (p *ProxyServer) handler() http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isWebSocketUpgrade(r) {
+			p.handleWebSocket(w, r)
+			return
+		}
+
 		// Capture the request
 		reqData, err := captureRequest(r)
 		if err != nil {
@@ -119,37 +196,159 @@ func (p *ProxyServer) Start() error {
 			p.interceptor(transaction)
 		}
 	})
+}
 
-	addr := fmt.Sprintf(":%d", p.port)
-	srv := &http.Server{
-		Addr:    addr,
-		Handler: handler,
+// closeAllWSConnections closes every active WebSocket connection so the
+// pumps observe EOF and store their sessions.
+func (p *ProxyServer) closeAllWSConnections() {
+	p.wsMu.Lock()
+	defer p.wsMu.Unlock()
+	for conn := range p.wsConns {
+		_ = conn.client.Close()
+		_ = conn.target.Close()
+	}
+}
+
+func (p *ProxyServer) trackWS(conn *wsConnection) {
+	p.wsMu.Lock()
+	p.wsConns[conn] = struct{}{}
+	p.wsMu.Unlock()
+	p.wsWG.Add(1)
+}
+
+func (p *ProxyServer) untrackWS(conn *wsConnection) {
+	p.wsMu.Lock()
+	delete(p.wsConns, conn)
+	p.wsMu.Unlock()
+	p.wsWG.Done()
+}
+
+// handleWebSocket captures a WebSocket upgrade: it forwards the handshake to
+// the target, relays the 101 response to the client, hijacks the connection,
+// and pumps frames in both directions while recording them.
+func (p *ProxyServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	reqData, err := captureRequest(r)
+	if err != nil {
+		log.Printf("Error capturing WebSocket request: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
 	}
 
-	// Channel to receive errors from the server
-	errChan := make(chan error, 1)
+	outReq := r.Clone(r.Context())
+	outReq.URL.Scheme = p.targetURL.Scheme
+	outReq.URL.Host = p.targetURL.Host
+	outReq.Host = p.targetURL.Host
+	outReq.RequestURI = ""
+	// Drop hop-by-hop headers except Connection/Upgrade, which the transport
+	// needs to perform the upgrade.
+	outReq.Header.Del("Proxy-Connection")
+	outReq.Header.Del("Keep-Alive")
+	outReq.Header.Del("TE")
+	outReq.Header.Del("Trailer")
+	outReq.Header.Del("Transfer-Encoding")
 
-	// Start server in a goroutine
-	go func() {
-		log.Printf("Starting proxy server on %s", addr)
-		errChan <- srv.ListenAndServe()
-	}()
+	resp, err := p.wsTransport.RoundTrip(outReq)
+	if err != nil {
+		log.Printf("WebSocket upgrade to %s failed: %v", p.targetURL, err)
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		return
+	}
 
-	// Listen for interrupt signals for graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	select {
-	case err := <-errChan:
-		return err
-	case sig := <-sigChan:
-		log.Printf("Received signal %v, shutting down gracefully...", sig)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(ctx); err != nil {
-			return fmt.Errorf("server shutdown error: %w", err)
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		// The upgrade did not complete: record the exchange as an ordinary
+		// HTTP transaction, exactly as before WebSocket support.
+		rw := newResponseWriter(w, p.MaxBodyBytes)
+		copyHeader(rw.Header(), resp.Header)
+		rw.WriteHeader(resp.StatusCode)
+		if resp.Body != nil {
+			_, _ = io.Copy(rw, resp.Body)
+			_ = resp.Body.Close()
 		}
-		return nil
+		transaction := APITransaction{
+			Request:           reqData,
+			Response:          captureResponse(rw),
+			ResponseTruncated: rw.Truncated(),
+		}
+		logTransaction(transaction)
+		if p.interceptor != nil {
+			p.interceptor(transaction)
+		}
+		return
+	}
+
+	// Hijack the client connection, then relay the 101 response over it —
+	// the same ordering httputil.ReverseProxy uses for upgrades.
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		_ = resp.Body.Close()
+		log.Printf("ResponseWriter does not support hijacking")
+		return
+	}
+	clientConn, brw, err := hj.Hijack()
+	if err != nil {
+		_ = resp.Body.Close()
+		log.Printf("Error hijacking WebSocket connection: %v", err)
+		return
+	}
+
+	targetConn, ok := resp.Body.(io.ReadWriteCloser)
+	if !ok {
+		_ = resp.Body.Close()
+		_ = clientConn.Close()
+		log.Printf("Upgrade response body is not a raw connection")
+		return
+	}
+
+	if err := writeSwitchProtocolsResponse(brw, resp); err != nil {
+		log.Printf("Error writing WebSocket handshake response: %v", err)
+		_ = resp.Body.Close()
+		_ = clientConn.Close()
+		return
+	}
+
+	session := &WebSocketSession{
+		HandshakeRequest: reqData,
+		ResponseStatus:   resp.StatusCode,
+		ResponseHeaders:  sanitizeHeaders(resp.Header),
+		Subprotocol:      resp.Header.Get("Sec-WebSocket-Protocol"),
+	}
+
+	conn := &wsConnection{
+		client:      clientConn,
+		clientR:     brw.Reader,
+		target:      targetConn,
+		targetR:     bufio.NewReader(targetConn),
+		session:     session,
+		maxMsgBytes: p.MaxWSMessageBytes,
+		maxMsgs:     p.MaxWSMessages,
+	}
+	p.trackWS(conn)
+	conn.run(p.WSInterceptor)
+	p.untrackWS(conn)
+}
+
+// writeSwitchProtocolsResponse writes a 101 response over the hijacked
+// connection. resp.Write cannot be used: for an upgrade response the body is
+// the raw target connection, which must not be copied.
+func writeSwitchProtocolsResponse(brw *bufio.ReadWriter, resp *http.Response) error {
+	if _, err := fmt.Fprintf(brw, "HTTP/1.1 %s\r\n", resp.Status); err != nil {
+		return err
+	}
+	if err := resp.Header.Write(brw); err != nil {
+		return err
+	}
+	if _, err := brw.WriteString("\r\n"); err != nil {
+		return err
+	}
+	return brw.Flush()
+}
+
+// copyHeader copies all header values from src to dst.
+func copyHeader(dst, src http.Header) {
+	for key, values := range src {
+		for _, value := range values {
+			dst.Add(key, value)
+		}
 	}
 }
 

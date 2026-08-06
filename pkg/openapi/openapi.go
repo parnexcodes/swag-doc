@@ -95,7 +95,10 @@ func (g *OpenAPIGenerator) LoadTransactionsFromDirectory(dirPath string) error {
 	}
 
 	for _, file := range files {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+		// WebSocket session files are captured by the same proxy but belong
+		// to the AsyncAPI generator; decoding them as HTTP transactions
+		// would pollute the OpenAPI output.
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") || strings.HasPrefix(file.Name(), "ws-session-") {
 			continue
 		}
 

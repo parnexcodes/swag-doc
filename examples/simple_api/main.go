@@ -1,10 +1,16 @@
 package main
 
 import (
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"strings"
+
+	"github.com/parnexcodes/swag-doc/pkg/proxy"
 )
 
 // User represents a user in the system
@@ -41,6 +47,7 @@ func main() {
 	http.HandleFunc("/users/", handleUser)
 	http.HandleFunc("/posts", handlePosts)
 	http.HandleFunc("/posts/", handlePost)
+	http.HandleFunc("/ws", handleWS)
 
 	// Start server
 	log.Println("Starting server on :3000")
@@ -187,4 +194,80 @@ func extractID(path, prefix string) int {
 		return -1
 	}
 	return id
+}
+
+// handleWS upgrades the connection to a WebSocket and echoes every received
+// frame back verbatim (the payload is unmasked for reading but re-sent as-is).
+func handleWS(w http.ResponseWriter, r *http.Request) {
+	if !isWebSocketUpgrade(r) {
+		http.Error(w, "Expected WebSocket upgrade", http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Upgrade", "websocket")
+	w.Header().Set("Connection", "Upgrade")
+	w.Header().Set("Sec-WebSocket-Accept", wsAcceptKey(r.Header.Get("Sec-WebSocket-Key")))
+	w.WriteHeader(http.StatusSwitchingProtocols)
+
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		log.Println("WebSocket: ResponseWriter does not support hijacking")
+		return
+	}
+	conn, brw, err := hj.Hijack()
+	if err != nil {
+		log.Printf("WebSocket: hijack failed: %v", err)
+		return
+	}
+	defer func() { _ = conn.Close() }()
+
+	log.Println("WebSocket client connected")
+	defer log.Println("WebSocket client disconnected")
+
+	// Echo loop: clients send masked frames; unmask for inspection, then
+	// forward the payload back unmasked (server-to-client frames are not
+	// masked per RFC 6455).
+	for {
+		hdr, err := proxy.ReadWSFrameHeader(brw.Reader)
+		if err != nil {
+			return
+		}
+		payload := make([]byte, hdr.PayloadLen)
+		if _, err := io.ReadFull(brw.Reader, payload); err != nil {
+			return
+		}
+		if hdr.Masked {
+			proxy.UnmaskBytes(payload, payload, hdr.MaskKey, 0)
+		}
+		if err := proxy.WriteWSFrame(conn, hdr.Fin, hdr.Opcode, payload, false); err != nil {
+			return
+		}
+	}
+}
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	connectionOK := false
+	for _, value := range r.Header.Values("Connection") {
+		for _, part := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), "upgrade") {
+				connectionOK = true
+			}
+		}
+	}
+	if !connectionOK {
+		return false
+	}
+	for _, part := range strings.Split(r.Header.Get("Upgrade"), ",") {
+		if strings.EqualFold(strings.TrimSpace(part), "websocket") {
+			return true
+		}
+	}
+	return false
+}
+
+// wsAcceptKey computes the Sec-WebSocket-Accept handshake response value
+// (RFC 6455 section 4.2.2).
+func wsAcceptKey(key string) string {
+	h := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	return base64.StdEncoding.EncodeToString(h[:])
 }
