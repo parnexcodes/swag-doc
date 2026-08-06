@@ -75,7 +75,7 @@ jobs:
 
       - name: Upload coverage
         if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage.out
@@ -108,7 +108,7 @@ jobs:
         run: go build -trimpath -ldflags="-s -w" -o ${{ matrix.artifact }} ./cmd/swagdoc
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: swagdoc-${{ matrix.os }}
           path: ${{ matrix.artifact }}
