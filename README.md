@@ -71,7 +71,7 @@ swagdoc generate --output swagger.json
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--output` | Output file for documentation | `swagger.json` |
+| `--output` | Output file for documentation; `.yaml`/`.yml` paths produce YAML, all others produce JSON | `swagger.json` |
 | `--data-dir` | Directory to read transaction data from | `./swagdoc-data` |
 | `--title` | Title for the API documentation | `API Documentation` |
 | `--description` | Description for the API documentation | `Generated API documentation` |
@@ -154,7 +154,6 @@ This starts the example API, proxies to it, sends sample requests, generates `sw
 
 - Framework-specific middleware (Express, Gin, FastAPI, etc.)
 - Interactive UI for viewing and editing generated docs
-- YAML output
 - WebSocket API documentation
 - gRPC support
 - GraphQL support

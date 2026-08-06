@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -396,8 +395,16 @@ func generateDocs(output string, dataDir string, title string, description strin
 		return fmt.Errorf("failed to create output directory: %v", err)
 	}
 
-	// Marshal spec to JSON
-	data, err := json.MarshalIndent(spec, "", "  ")
+	// Select serialization format from the output file extension:
+	// .yaml/.yml (case-insensitive) produce YAML, anything else JSON.
+	format := openapi.FormatJSON
+	switch strings.ToLower(filepath.Ext(output)) {
+	case ".yaml", ".yml":
+		format = openapi.FormatYAML
+	}
+
+	// Marshal spec to the selected format
+	data, err := openapi.MarshalSpec(spec, format)
 	if err != nil {
 		logger.PrintError("Failed to marshal specification: %v", err)
 		return fmt.Errorf("failed to marshal specification: %v", err)
