@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -287,7 +288,8 @@ func TestFileStorageCloseFlushesToDisk(t *testing.T) {
 	require.NoError(t, err)
 	var sessionFile string
 	for _, f := range files {
-		if !f.IsDir() && filepath.Ext(f.Name()) == ".json" {
+		// Select the HTTP session file, not the WebSocket session file.
+		if !f.IsDir() && strings.HasPrefix(f.Name(), "session-") && filepath.Ext(f.Name()) == ".json" {
 			sessionFile = filepath.Join(tmpDir, f.Name())
 		}
 	}

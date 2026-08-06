@@ -71,8 +71,12 @@ demo: build
 	curl -s -X POST http://localhost:8888/posts \
 		-H "Content-Type: application/json" \
 		-d '{"title":"New Post","content":"This is a new post","user_id":1}' > /dev/null && \
+	echo "Exercising WebSocket endpoint..." && \
+	go run ./examples/ws_client/main.go && \
 	echo "Generating Swagger documentation..." && \
 	./bin/swagdoc generate --output swagger.json --base-path http://localhost:3000 && \
+	echo "Generating AsyncAPI documentation..." && \
+	./bin/swagdoc generate --format asyncapi --output asyncapi.json --base-path http://localhost:3000 && \
 	echo "Stopping servers..." && \
 	kill $$PROXY_PID && \
 	kill $$API_PID

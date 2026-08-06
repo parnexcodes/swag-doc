@@ -66,6 +66,8 @@ swagdoc generate --output swagger.json
 | `--target` | Target API server URL (required) | |
 | `--data-dir` | Directory to store API transaction data | `./swagdoc-data` |
 | `--max-body-bytes` | Maximum response body size (in bytes) captured per transaction; the full response is still forwarded to the client | `10485760` (10 MiB) |
+| `--max-ws-message-bytes` | Maximum WebSocket message payload size (in bytes) captured per message; the full payload is still forwarded | `65536` (64 KiB) |
+| `--max-ws-messages` | Maximum WebSocket messages captured per connection; forwarding continues after the limit | `1000` |
 
 #### Generate Command
 
@@ -81,6 +83,7 @@ swagdoc generate --output swagger.json
 | `--group-by-path` | Group API endpoints by path segments | `true` |
 | `--tag-mapping` | Custom tag mappings in format `path:tag` | |
 | `--version-prefix` | Custom version prefixes | |
+| `--format` | Documentation format to generate: `openapi` or `asyncapi` | `openapi` |
 
 #### Version Command
 
@@ -88,6 +91,21 @@ swagdoc generate --output swagger.json
 swagdoc version
 # swagdoc dev (commit: none, built: unknown)
 ```
+
+### WebSocket API Documentation
+
+SwagDoc also documents WebSocket endpoints as a standard **AsyncAPI 3.1.0** document, generated from the same captured traffic:
+
+```bash
+swagdoc generate --format asyncapi --output asyncapi.json
+```
+
+- The proxy captures WebSocket handshakes (path, headers, subprotocol) and the messages exchanged in each direction, forwarding the live connection untouched.
+- Each templated endpoint (numeric IDs and UUIDs become `{param}` segments) becomes an AsyncAPI channel with the path as its address; client messages appear as a `receive` operation and server messages as a `send` operation, with payload schemas inferred from JSON payloads.
+- Authentication observed in handshakes (Bearer tokens, API keys) is emitted as AsyncAPI security schemes on the affected operations.
+- YAML output works the same as for OpenAPI: a `.yaml`/`.yml` output path produces YAML.
+
+Captured WebSocket sessions are stored in `ws-session-*.json` files, separate from HTTP `session-*.json` files; OpenAPI generation ignores them, so `swagger.json` output is unaffected by WebSocket traffic. Compressed (permessage-deflate) payloads are captured as-is and documented as binary.
 
 ### Organizing API Documentation
 
@@ -148,13 +166,12 @@ git push origin v1.0.0
 make demo
 ```
 
-This starts the example API, proxies to it, sends sample requests, generates `swagger.json`, and stops the servers.
+This starts the example API, proxies to it, sends sample requests and WebSocket messages, generates `swagger.json` and `asyncapi.json`, and stops the servers.
 
 ## Future Features
 
 - Framework-specific middleware (Express, Gin, FastAPI, etc.)
 - Interactive UI for viewing and editing generated docs
-- WebSocket API documentation
 - gRPC support
 - GraphQL support
 

@@ -3,6 +3,8 @@ package openapi
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/parnexcodes/swag-doc/internal/testcorpus"
@@ -916,4 +918,28 @@ func TestGenerateSpecDeterministicAcrossRuns(t *testing.T) {
 	first := marshal(t)
 	second := marshal(t)
 	assert.Equal(t, first, second)
+}
+
+func TestLoadTransactionsFromDirectorySkipsWebSocketSessions(t *testing.T) {
+	dir := t.TempDir()
+
+	// HTTP session file with one transaction.
+	httpData, err := json.Marshal([]proxy.APITransaction{{
+		Request: proxy.RequestData{Method: "GET", Path: "/users"},
+	}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "session-test.json"), httpData, 0o644))
+
+	// WebSocket session file that would decode into garbage transactions.
+	wsData, err := json.Marshal([]proxy.WebSocketSession{{
+		HandshakeRequest: proxy.RequestData{Method: "GET", Path: "/chat/1"},
+		ResponseStatus:   101,
+	}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ws-session-test.json"), wsData, 0o644))
+
+	generator := NewOpenAPIGenerator(OpenAPIConfig{})
+	require.NoError(t, generator.LoadTransactionsFromDirectory(dir))
+	require.Len(t, generator.transactions, 1, "ws-session files must be skipped")
+	assert.Equal(t, "/users", generator.transactions[0].Request.Path)
 }

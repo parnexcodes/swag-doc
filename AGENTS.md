@@ -5,7 +5,7 @@
 - Use Go 1.26; `go.mod` specifies Go 1.26.5 and CI installs via `go-version-file`.
 - Run the CI-equivalent suite with `go test -v ./...`; coverage uses `go test -coverprofile=coverage.out ./...` followed by `go tool cover -func=coverage.out`.
 - Run one test with `go test ./pkg/<package> -run '^TestName$' -v` (for example, `go test ./pkg/openapi -run '^TestGenerateSpec$' -v`).
-- Build the shipped CLI with `go build -o bin/swagdoc ./cmd/swagdoc` or `make build`. The release workflow uses GoReleaser for cross-platform binaries.
+- Build the shipped CLI with `go build -o bin/swagdoc ./cmd/swagdoc`. The release workflow uses GoReleaser for cross-platform binaries.
 - Lint with `golangci-lint run` and format with `golangci-lint fmt`.
 
 ## Mandatory Post-Coding Verification

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/parnexcodes/swag-doc/pkg/asyncapi"
 	"github.com/parnexcodes/swag-doc/pkg/logger"
 	"github.com/parnexcodes/swag-doc/pkg/openapi"
 	"github.com/parnexcodes/swag-doc/pkg/proxy"
@@ -26,10 +27,12 @@ var (
 
 var (
 	// Proxy command flags
-	proxyPort         int
-	proxyTarget       string
-	proxyDataDir      string
-	proxyMaxBodyBytes int64
+	proxyPort              int
+	proxyTarget            string
+	proxyDataDir           string
+	proxyMaxBodyBytes      int64
+	proxyMaxWSMessageBytes int64
+	proxyMaxWSMessages     int
 
 	// Generate command flags
 	generateOutput        string
@@ -42,6 +45,7 @@ var (
 	generateUsePathGroups bool
 	generateTagMapping    []string
 	generateVersionPrefix []string
+	generateFormat        string
 
 	// Root command
 	rootCmd = &cobra.Command{
@@ -79,7 +83,7 @@ type placeholders to ensure privacy and security.`,
 			if proxyTarget == "" {
 				return fmt.Errorf("target API server URL is required")
 			}
-			return runProxy(proxyPort, proxyTarget, proxyDataDir, proxyMaxBodyBytes)
+			return runProxy(proxyPort, proxyTarget, proxyDataDir, proxyMaxBodyBytes, proxyMaxWSMessageBytes, proxyMaxWSMessages)
 		},
 	}
 
@@ -103,7 +107,7 @@ captured API transactions from the proxy server.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return generateDocs(generateOutput, generateDataDir, generateTitle, generateDescription,
 				generateVersion, generateBasePath, generateCleanup, generateUsePathGroups,
-				generateTagMapping, generateVersionPrefix)
+				generateTagMapping, generateVersionPrefix, generateFormat)
 		},
 	}
 
@@ -177,6 +181,8 @@ func init() {
 	proxyCmd.Flags().StringVarP(&proxyTarget, "target", "t", "", "Target API server URL")
 	proxyCmd.Flags().StringVarP(&proxyDataDir, "data-dir", "d", defaultDataDir, "Directory to store API transaction data")
 	proxyCmd.Flags().Int64Var(&proxyMaxBodyBytes, "max-body-bytes", proxy.DefaultMaxBodyBytes, "Maximum response body size (in bytes) captured per transaction; the full response is still forwarded")
+	proxyCmd.Flags().Int64Var(&proxyMaxWSMessageBytes, "max-ws-message-bytes", proxy.DefaultMaxWSMessageBytes, "Maximum WebSocket message payload size (in bytes) captured per message; the full payload is still forwarded")
+	proxyCmd.Flags().IntVar(&proxyMaxWSMessages, "max-ws-messages", proxy.DefaultMaxWSMessages, "Maximum WebSocket messages captured per connection; forwarding continues after the limit")
 	_ = proxyCmd.MarkFlagRequired("target")
 
 	// Add generate command flags
@@ -190,6 +196,7 @@ func init() {
 	generateCmd.Flags().BoolVar(&generateUsePathGroups, "group-by-path", true, "Group API endpoints by path segments")
 	generateCmd.Flags().StringSliceVar(&generateTagMapping, "tag-mapping", []string{}, "Custom tag mappings in format 'path:tag' (can be used multiple times)")
 	generateCmd.Flags().StringSliceVar(&generateVersionPrefix, "version-prefix", []string{}, "Custom version prefixes (can be used multiple times)")
+	generateCmd.Flags().StringVar(&generateFormat, "format", "openapi", "Documentation format to generate: openapi or asyncapi")
 
 	// Add commands to root
 	rootCmd.AddCommand(proxyCmd)
@@ -205,7 +212,7 @@ func main() {
 	}
 }
 
-func runProxy(port int, target string, dataDir string, maxBodyBytes int64) error {
+func runProxy(port int, target string, dataDir string, maxBodyBytes int64, maxWSMessageBytes int64, maxWSMessages int) error {
 	// Print a beautiful startup banner
 	logger.PrintStartupBanner(port, target, dataDir)
 
@@ -235,6 +242,9 @@ func runProxy(port int, target string, dataDir string, maxBodyBytes int64) error
 		return fmt.Errorf("failed to create proxy server: %v", err)
 	}
 	server.MaxBodyBytes = maxBodyBytes
+	server.MaxWSMessageBytes = maxWSMessageBytes
+	server.MaxWSMessages = maxWSMessages
+	server.WSInterceptor = proxy.WebSocketSessionInterceptor(storage)
 
 	if err := server.Start(); err != nil {
 		logger.PrintError("Proxy server error: %v", err)
@@ -302,11 +312,12 @@ func selectBestTransaction(transactions []proxy.APITransaction) proxy.APITransac
 	return best
 }
 
-// generateDocs generates Swagger/OpenAPI documentation from API transactions
-func generateDocs(output string, dataDir string, title string, description string, version string, basePath string, cleanup bool, usePathGroups bool, tagMapping []string, versionPrefix []string) error {
+// generateDocs generates documentation from captured API transactions in the
+// requested format (openapi or asyncapi) and writes it to output.
+func generateDocs(output string, dataDir string, title string, description string, version string, basePath string, cleanup bool, usePathGroups bool, tagMapping []string, versionPrefix []string, format string) error {
 	// Print header
 	fmt.Println(logger.HighlightHeader(" SwagDoc Documentation Generator "))
-	logger.PrintInfo("Generating Swagger documentation to %s", output)
+	logger.PrintInfo("Generating %s documentation to %s", format, output)
 	logger.PrintInfo("Reading API transaction data from %s", dataDir)
 
 	// Create absolute path for output file
@@ -316,6 +327,34 @@ func generateDocs(output string, dataDir string, title string, description strin
 		return fmt.Errorf("failed to get absolute path for output file: %v", err)
 	}
 
+	var genErr error
+	switch format {
+	case "asyncapi":
+		genErr = generateAsyncAPIDocs(absOutput, dataDir, title, description, version, basePath)
+	case "openapi":
+		genErr = generateOpenAPIDocs(absOutput, dataDir, title, description, version, basePath, usePathGroups, tagMapping, versionPrefix)
+	default:
+		genErr = fmt.Errorf("unknown format %q: must be openapi or asyncapi", format)
+	}
+	if genErr != nil {
+		return genErr
+	}
+
+	// Clean up data directory if requested
+	if cleanup {
+		logger.PrintInfo("Cleaning up data directory: %s", dataDir)
+		if err := os.RemoveAll(dataDir); err != nil {
+			logger.PrintError("Failed to clean up data directory: %v", err)
+			return fmt.Errorf("failed to clean up data directory: %v", err)
+		}
+		logger.PrintSuccess("Data directory cleaned up successfully")
+	}
+
+	return nil
+}
+
+// generateOpenAPIDocs writes the OpenAPI document to absOutput.
+func generateOpenAPIDocs(absOutput string, dataDir string, title string, description string, version string, basePath string, usePathGroups bool, tagMapping []string, versionPrefix []string) error {
 	// Create a read-only view to read API transactions — unlike
 	// NewFileStorage this does not create a session file in the data
 	// directory, so generate never mutates the captured data.
@@ -398,7 +437,7 @@ func generateDocs(output string, dataDir string, title string, description strin
 	// Select serialization format from the output file extension:
 	// .yaml/.yml (case-insensitive) produce YAML, anything else JSON.
 	format := openapi.FormatJSON
-	switch strings.ToLower(filepath.Ext(output)) {
+	switch strings.ToLower(filepath.Ext(absOutput)) {
 	case ".yaml", ".yml":
 		format = openapi.FormatYAML
 	}
@@ -417,16 +456,75 @@ func generateDocs(output string, dataDir string, title string, description strin
 	}
 
 	logger.PrintSuccess("Swagger documentation generated successfully: %s", absOutput)
+	return nil
+}
 
-	// Clean up data directory if requested
-	if cleanup {
-		logger.PrintInfo("Cleaning up data directory: %s", dataDir)
-		if err := os.RemoveAll(dataDir); err != nil {
-			logger.PrintError("Failed to clean up data directory: %v", err)
-			return fmt.Errorf("failed to clean up data directory: %v", err)
+// generateAsyncAPIDocs writes the AsyncAPI document to absOutput.
+func generateAsyncAPIDocs(absOutput string, dataDir string, title string, description string, version string, basePath string) error {
+	// Create a read-only view to read WebSocket sessions — unlike
+	// NewFileStorage this does not create a session file in the data
+	// directory, so generate never mutates the captured data.
+	storage, err := proxy.NewFileStorageReader(dataDir)
+	if err != nil {
+		logger.PrintError("Failed to create storage: %v", err)
+		return fmt.Errorf("failed to create storage: %v", err)
+	}
+	defer func() {
+		if err := storage.Close(); err != nil {
+			logger.PrintError("Failed to close storage: %v", err)
 		}
-		logger.PrintSuccess("Data directory cleaned up successfully")
+	}()
+
+	sessions, err := storage.GetAllWebSocketSessions()
+	if err != nil {
+		logger.PrintError("Failed to read WebSocket sessions: %v", err)
+		return fmt.Errorf("failed to read WebSocket sessions: %v", err)
+	}
+	logger.PrintInfo("Found %d WebSocket sessions across all session files", len(sessions))
+
+	// Create AsyncAPI generator with configuration
+	generator := asyncapi.NewGenerator(asyncapi.Config{
+		Title:       title,
+		Description: description,
+		Version:     version,
+		BasePath:    basePath,
+	})
+	for _, session := range sessions {
+		generator.AddSession(session)
 	}
 
+	doc, err := generator.Generate()
+	if err != nil {
+		logger.PrintError("Failed to generate AsyncAPI document: %v", err)
+		return fmt.Errorf("failed to generate AsyncAPI document: %v", err)
+	}
+
+	// Create output directory if needed
+	outDir := filepath.Dir(absOutput)
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		logger.PrintError("Failed to create output directory: %v", err)
+		return fmt.Errorf("failed to create output directory: %v", err)
+	}
+
+	// Select serialization format from the output file extension:
+	// .yaml/.yml (case-insensitive) produce YAML, anything else JSON.
+	format := asyncapi.FormatJSON
+	switch strings.ToLower(filepath.Ext(absOutput)) {
+	case ".yaml", ".yml":
+		format = asyncapi.FormatYAML
+	}
+
+	data, err := asyncapi.Marshal(doc, format)
+	if err != nil {
+		logger.PrintError("Failed to marshal AsyncAPI document: %v", err)
+		return fmt.Errorf("failed to marshal AsyncAPI document: %v", err)
+	}
+
+	if err := os.WriteFile(absOutput, data, 0644); err != nil {
+		logger.PrintError("Failed to write AsyncAPI document: %v", err)
+		return fmt.Errorf("failed to write AsyncAPI document: %v", err)
+	}
+
+	logger.PrintSuccess("AsyncAPI documentation generated successfully: %s", absOutput)
 	return nil
 }
